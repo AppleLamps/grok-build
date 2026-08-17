@@ -469,6 +469,13 @@ async fn run_browser_auth_flow(
                 server = server_name,
                 "Fresh tokens detected on disk from another auth flow; skipping callback wait"
             );
+            // The poll only observed the on-disk file. Load those tokens into
+            // this leader's AuthorizationManager — otherwise force_reauth
+            // rebuilds the transport from stale/empty in-memory credentials.
+            let mut mgr = auth_manager.lock().await;
+            mgr.initialize_from_store().await.map_err(|e| {
+                format!("Failed to load tokens written by another auth flow: {e}")
+            })?;
         }
         // Abandoned consent: bound the wait so this leader releases the
         // in-process watch and the cross-process `mcp_auth_*.lock` instead of

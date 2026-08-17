@@ -5,7 +5,7 @@
 //! functions that depend on shell-specific infrastructure (persistence,
 //! auth, registry client, storage client, session restore).
 use crate::util::config::WorktreeType as ShellWorktreeType;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 use xai_grok_workspace::session::git::find_git_root_from_path;
 pub use xai_grok_workspace::worktree::*;
@@ -175,7 +175,6 @@ pub(crate) async fn resume_session_in_worktree(
     auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
     agent_id: &str,
 ) -> Result<ResumeSessionInWorktreeResponse> {
-    use xai_grok_workspace::session::git::effective_worktree_path;
     tracing::info!(
         target: WORKTREE_LOG,
         session_id = %req.session_id,
@@ -207,95 +206,25 @@ pub(crate) async fn resume_session_in_worktree(
         )
         .await;
     }
-    let client = registry_client.ok_or_else(|| {
+    let _client = registry_client.ok_or_else(|| {
         anyhow::anyhow!(
             "Session {} not found locally and session registry is not available \
              (auth may be missing or registry is disabled)",
             req.session_id,
         )
     })?;
+    // Session-state archive restore is stubbed in this build. Fail before
+    // creating a worktree, and do not tell the user to retry — retry cannot
+    // succeed.
     tracing::info!(
         session_id = %req.session_id,
-        "Restoring remote session: creating worktree first to keep source clean"
+        "Remote session restore is not available in this build; skipping worktree create"
     );
-    let worktree_type = req
-        .worktree_type
-        .map(ShellWorktreeType::from)
-        .unwrap_or(worktree_type_default);
-    let wt_resp = create_worktree_for_resume(
-        &req.source_cwd,
-        req.copy_mode,
-        worktree_type,
-        req.git_ref.clone(),
+    anyhow::bail!(
+        "Session {} cannot be restored: {}",
+        req.session_id,
+        crate::session::restore::UNAVAILABLE,
     )
-    .await?;
-    let record = client
-        .get_session(&req.session_id)
-        .await
-        .context("fetching session record for remote restore")?;
-    let turn = crate::session::restore::resolve_restore_turn(&record, None);
-    let restore_code = remote_worktree_restores_codebase(req.restore_code, restore_code_default);
-    let memory_dl_future = crate::session::restore::download_to_tempfile(
-        client,
-        &req.session_id,
-        "memory.tar.gz",
-        turn,
-    );
-    let state_dl_future = async {
-        Err(anyhow::anyhow!(
-            "session-state archive restore unavailable in this build"
-        ))
-    };
-    let (memory_dl, state_dl) = {
-        let _ = restore_code;
-        tokio::join!(memory_dl_future, state_dl_future)
-    };
-    let codebase_ok = false;
-    let _memory_result =
-        crate::session::restore::apply_memory_download(memory_dl, &wt_resp.worktree_path).await;
-    let (session_state_result, local_session_id) =
-        crate::session::restore::apply_session_state_download(
-            state_dl,
-            &req.session_id,
-            &wt_resp.worktree_path,
-        )
-        .await;
-    if session_state_result.is_skipped() {
-        cleanup_worktree_on_failure(&req.source_cwd, &wt_resp.worktree_path).await;
-        anyhow::bail!(
-            "Session {} session-state archive was unavailable -- \
-             conversation history cannot be recovered. Retry in a few moments.",
-            req.session_id,
-        );
-    }
-    let worktree_root = std::path::Path::new(&wt_resp.worktree_path);
-    let source_path = std::path::Path::new(&req.source_cwd);
-    let source_git_root = wt_resp.source_git_root.as_deref().map(std::path::Path::new);
-    let effective_cwd = effective_worktree_path(worktree_root, source_path, source_git_root)
-        .to_string_lossy()
-        .to_string();
-    let restore_summary = None;
-    let restore_degree = if codebase_ok {
-        Some(xai_grok_workspace::session::git::RestoreDegree::Full)
-    } else {
-        None
-    };
-    Ok(ResumeSessionInWorktreeResponse {
-        session_id: local_session_id,
-        worktree_path: wt_resp.worktree_path,
-        effective_cwd,
-        remote_restored: true,
-        parent_session_id: req.session_id.clone(),
-        chat_messages_copied: session_state_result.files_copied as usize,
-        updates_copied: if session_state_result.updates_restored {
-            1
-        } else {
-            0
-        },
-        code_restored: codebase_ok,
-        restore_summary,
-        restore_degree,
-    })
 }
 /// Local-session resume: create worktree from source, fork session into it.
 async fn resume_local_session_in_worktree(
@@ -465,81 +394,11 @@ pub(crate) async fn rehydrate_session_in_worktree(
             warnings: vec![],
         });
     }
-    if !worktree_path.exists() {
-        tracing::info!(session_id = %req.session_id, %worktree_path_str, "rehydrate: creating worktree");
-        if let Some(parent) = worktree_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let source = req.repo_root.clone();
-        let dest = worktree_path_str.to_string();
-        let session_id = req.session_id.clone();
-        let btrfs_delegate = btrfs_delegate_from_env();
-        tokio::task::spawn_blocking(move || {
-            use xai_fast_worktree::{
-                CreationMode, IgnoredFilesMode, WorkingTreeMode, WorktreeBuilder,
-            };
-            let mut builder = WorktreeBuilder::new(&source, &dest)
-                .working_tree_mode(WorkingTreeMode::CleanAll)
-                .ignored_files_mode(IgnoredFilesMode::Skip)
-                .creation_mode(CreationMode::Linked)
-                .worktree_kind(xai_fast_worktree::WorktreeKind::Fork)
-                .session_id(session_id);
-            if let Some(delegate) = btrfs_delegate {
-                builder = builder.btrfs_delegate(delegate);
-            }
-            builder.create()
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("worktree creation task failed: {e}"))??;
-    }
-    let client = registry_client.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Session registry client is required for rehydration \
-             (auth may be missing or registry is disabled)"
-        )
-    })?;
-    let record = client
-        .get_session(&req.session_id)
-        .await
-        .context("fetching session record for rehydration")?;
-    let turn = crate::session::restore::resolve_restore_turn(&record, None);
-    let memory_dl_future = crate::session::restore::download_to_tempfile(
-        client,
-        &req.session_id,
-        "memory.tar.gz",
-        turn,
-    );
-    let state_dl_future = async {
-        Err(anyhow::anyhow!(
-            "session-state archive restore unavailable in this build"
-        ))
-    };
-    let (memory_dl, state_dl) = tokio::join!(memory_dl_future, state_dl_future);
-    let _ = ops;
-    let mut warnings: Vec<String> = Vec::new();
-    let codebase_restored = false;
-    let memory_result =
-        crate::session::restore::apply_memory_download(memory_dl, &req.source_cwd).await;
-    let session_state_result = crate::session::restore::apply_session_state_in_place(
-        state_dl,
-        &req.session_id,
-        &req.source_cwd,
-    )
-    .await;
-    if session_state_result.is_skipped() {
-        warnings.push(
-            "Session state archive was unavailable; conversation history not restored.".to_string(),
-        );
-    }
-    Ok(RehydrateSessionResponse {
-        session_id: req.session_id.clone(),
-        worktree_path: worktree_path_str.to_string(),
-        effective_cwd: req.source_cwd.clone(),
-        codebase_restored,
-        session_state_restored: !session_state_result.is_skipped(),
-        memory_restored: memory_result.sessions_copied > 0,
-        warnings,
-    })
+    // Session-state archive restore is stubbed in this build. Fail before
+    // creating a worktree so callers cannot treat an empty conversation as a
+    // successful rehydrate, and so we do not leave an unrestorable tree.
+    let _ = (ops, registry_client);
+    anyhow::bail!(crate::session::restore::UNAVAILABLE)
 }
 #[cfg(all(test, unix))]
 mod tests {

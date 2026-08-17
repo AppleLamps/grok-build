@@ -2416,6 +2416,8 @@ pub(super) fn dispatch_dashboard_permission_select(
     // pattern (and the glob routing) identically instead of dropping it.
     let edited_pattern = super::permissions::take_edited_pattern(agent, &perm);
     let meta = super::permissions::build_selection_meta(&perm, &option_id, edited_pattern);
+    let enable_always_approve =
+        option_id.0.as_ref() == xai_grok_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID;
 
     perm.request
         .response_tx
@@ -2430,6 +2432,25 @@ pub(super) fn dispatch_dashboard_permission_select(
     // Refresh the peek (it likely no longer has a question).
     if let Some(d) = app.dashboard.as_mut() {
         d.set_peek(None);
+    }
+
+    // Match the agent-view permission path: "don't ask again for anything"
+    // must flip YOLO on the peeked agent, persist, and drain remaining
+    // prompts. `set_yolo_mode` is gated on `ActiveView::Agent`, so
+    // temporarily retarget like `dispatch_dashboard_toggle_auto_approve`.
+    if enable_always_approve {
+        let already_on = app
+            .agents
+            .get(&target_id)
+            .map(|a| a.session.is_yolo())
+            .unwrap_or(false);
+        if !already_on {
+            let saved_view = app.active_view;
+            app.active_view = ActiveView::Agent(target_id);
+            let effects = set_yolo_mode(app, true);
+            app.active_view = saved_view;
+            return effects;
+        }
     }
     vec![]
 }

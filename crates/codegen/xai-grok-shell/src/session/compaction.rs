@@ -1630,12 +1630,6 @@ impl SessionActor {
         self.persist_compaction_segment(&segment_messages, &generate_session_compact);
         self.chat_state_handle
             .record_compaction_at(prompt_index_at_compaction);
-        self.persist_compaction_checkpoint(
-            &compacted_history,
-            prompt_index_at_compaction,
-            auto_continue,
-            original_user_info,
-        );
         let prefix_len = if self
             .compaction
             .prefix_released
@@ -1656,6 +1650,14 @@ impl SessionActor {
             )
             .await
         };
+        // Persist the history actually installed into chat state, including any
+        // forked inherited prefix. Rewind restores this checkpoint verbatim.
+        self.persist_compaction_checkpoint(
+            &compacted_history,
+            prompt_index_at_compaction,
+            auto_continue,
+            original_user_info,
+        );
         let new_len = compacted_history.len();
         self.chat_state_handle
             .replace_conversation_for_compaction(compacted_history);

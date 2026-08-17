@@ -5,7 +5,7 @@ use xai_file_utils::storage_client::StorageClient;
 
 use crate::agent::session_registry_client::{SessionRecord, SessionRegistryClient};
 
-const UNAVAILABLE: &str = "Remote session restore is not available in this build";
+pub(crate) const UNAVAILABLE: &str = "Remote session restore is not available in this build";
 
 #[derive(Debug)]
 pub struct RestoreResult {
