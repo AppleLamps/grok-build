@@ -120,7 +120,7 @@ pub(super) fn build_todo_gate_reminder(pending: &[&str], unbacked_in_progress: &
     }
     let _ = write!(
         buf,
-        "Per <task_completion_discipline>, advance the next pending todo \
+        "Advance the next pending todo \
          with the appropriate tool call NOW. If you have a genuine external \
          blocker (missing credential, denied permission, network unreachable), \
          state it explicitly AND mark the affected todos `cancelled` via \
@@ -131,7 +131,7 @@ pub(super) fn build_todo_gate_reminder(pending: &[&str], unbacked_in_progress: &
 /// Resolve the runtime `ReminderPolicy` from the resolved inputs.
 ///
 /// Precedence: CLI `--todo-gate` > remote `/settings` > built-in default
-/// (which is disabled). Extracted from `spawn_session_actor` so the
+/// (enabled). Extracted from `spawn_session_actor` so the
 /// precedence rules are unit-testable. Named `resolve_*` to match the
 /// sibling precedence helpers in `crate::util::config`
 /// (`resolve_zdr_access_enabled`, `resolve_restore_code`, …).
@@ -468,23 +468,24 @@ fn format_workflow_completion_reminder(
     }
     buf
 }
-/// TodoGate when enabled and the prompt carries `<task_completion_discipline>`
-/// (`{DISCIPLINE_BLOCK}`), but NOT while the goal loop is active — the
-/// continuation directive drives the loop there (see the body).
+/// TodoGate when enabled, for the primary audience, but NOT while the
+/// goal loop is active — the continuation directive drives the loop
+/// there. The built-in prompt no longer carries
+/// `<task_completion_discipline>`, so activation is the policy bit
+/// plus audience rather than a prompt-template scan.
 pub(super) fn todo_gate_active(
     policy: &xai_grok_agent::system_reminder::ReminderPolicy,
     audience: xai_grok_agent::prompt::context::PromptAudience,
-    definition: &AgentDefinition,
     goal_harness_enabled: bool,
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
 ) -> bool {
     if !policy.todo_gate.enabled {
         return false;
     }
-    if laziness_injection_active(goal_harness_enabled, goal_status) {
+    if audience != xai_grok_agent::prompt::context::PromptAudience::Primary {
         return false;
     }
-    definition.carries_task_completion_discipline(audience)
+    !laziness_injection_active(goal_harness_enabled, goal_status)
 }
 impl SessionActor {
     /// Injects a one-shot date-rollover `<system-reminder>` when a long session crosses local
@@ -769,7 +770,6 @@ impl SessionActor {
         let active = todo_gate_active(
             policy,
             agent.prompt_audience(),
-            agent.definition(),
             self.goal_harness_enabled(),
             goal_status,
         );

@@ -2875,9 +2875,9 @@ impl SessionActor {
 /// Discard an egregious (2× cap) media-gen generation and re-sample this
 /// many times; later over-caps in the same turn use first-K.
 const MAX_MEDIA_GEN_OVER_CAP_RESAMPLES: u32 = 1;
-const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS: u32 = 16;
-const NUDGE_AFTER_IDENTICAL_TOOL_CALLS: u32 = 8;
-const MAX_CONSECUTIVE_TRUE_NOOPS: u32 = 4;
+const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS: u32 = 6;
+const NUDGE_AFTER_IDENTICAL_TOOL_CALLS: u32 = 3;
+const MAX_CONSECUTIVE_TRUE_NOOPS: u32 = 2;
 const _: () = assert!(NUDGE_AFTER_IDENTICAL_TOOL_CALLS < MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS);
 const _: () = assert!(MAX_CONSECUTIVE_TRUE_NOOPS < NUDGE_AFTER_IDENTICAL_TOOL_CALLS);
 const ACTION_STATIONARITY_NUDGE_TEMPLATE: &str = "You have called the same tool \
@@ -2944,7 +2944,7 @@ mod identical_tool_call_run_tests {
         NUDGE_AFTER_IDENTICAL_TOOL_CALLS, command_is_true,
     };
     #[test]
-    fn identical_non_true_resets_and_caps_at_16() {
+    fn identical_non_true_resets_and_caps_at_hard_stop() {
         let mut run = IdenticalToolCallRun::default();
         assert_eq!(run.observe("a", "a", false), 1);
         assert_eq!(run.observe("a", "a", false), 2);
@@ -2960,9 +2960,9 @@ mod identical_tool_call_run_tests {
         );
     }
     #[test]
-    fn true_noops_chain_across_args_and_stop_at_4() {
+    fn true_noops_chain_across_args_and_stop_at_true_noop_cap() {
         let mut run = IdenticalToolCallRun::default();
-        for i in 1..=4 {
+        for i in 1..=MAX_CONSECUTIVE_TRUE_NOOPS {
             assert_eq!(run.observe(&format!("sig{i}"), "bash", true), i);
         }
         assert!(run.is_true_noop_run);

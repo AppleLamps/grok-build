@@ -4,7 +4,7 @@
 /// only as the default for `TodoGateConfig`; the runtime consumer reads
 /// the live value from `ReminderPolicy.todo_gate.max_fires_per_prompt`,
 /// so this constant is NOT a hardcoded cap.
-pub const DEFAULT_TODO_GATE_MAX_FIRES: u32 = 2;
+pub const DEFAULT_TODO_GATE_MAX_FIRES: u32 = 8;
 
 /// Session-level system reminder policy.
 ///
@@ -61,10 +61,10 @@ impl Default for TodoNudgeConfig {
 /// if pending/unbacked-in-progress todos remain — see
 /// `xai-grok-shell::session::acp_session::evaluate_todo_gate`.
 ///
-/// **Disabled by default.** Operators opt in via the remote
-/// `todo_gate_enabled = true` remote settings key, or via the
-/// `--todo-gate` CLI flag (session-scoped force-enable, highest
-/// precedence).
+/// **Enabled by default** for primary coding sessions. Operators can
+/// disable it via remote `todo_gate_enabled = false`. The `--todo-gate`
+/// CLI flag is a session-scoped force-enable (highest precedence) that
+/// overrides a remote disable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TodoGateConfig {
     /// Whether the gate runs at all.
@@ -78,7 +78,7 @@ pub struct TodoGateConfig {
 impl Default for TodoGateConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
         }
     }
@@ -89,38 +89,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_todo_gate_is_disabled_with_const_cap() {
+    fn default_todo_gate_is_enabled_with_const_cap() {
         let cfg = TodoGateConfig::default();
-        assert!(!cfg.enabled, "TodoGate must be opt-in");
+        assert!(cfg.enabled, "TodoGate must run by default");
         assert_eq!(cfg.max_fires_per_prompt, DEFAULT_TODO_GATE_MAX_FIRES);
-        assert_eq!(DEFAULT_TODO_GATE_MAX_FIRES, 2);
+        assert_eq!(DEFAULT_TODO_GATE_MAX_FIRES, 8);
     }
 
     #[test]
-    fn reminder_policy_default_disables_gate_but_keeps_nudge_and_global_enabled() {
+    fn reminder_policy_default_enables_gate_and_keeps_nudge_and_global_enabled() {
         let policy = ReminderPolicy::default();
         assert!(
             policy.enabled,
             "global system reminders stay enabled by default"
         );
         assert!(
-            !policy.todo_gate.enabled,
-            "TodoGate ships disabled; remote/local opt-in required"
+            policy.todo_gate.enabled,
+            "TodoGate ships enabled so content-only turns cannot drop open todos"
         );
-        assert_eq!(policy.todo_gate.max_fires_per_prompt, 2);
+        assert_eq!(policy.todo_gate.max_fires_per_prompt, 8);
         // The two reminder mechanisms are independent — flipping one
         // must not change the other (regression guard).
         assert!(policy.todo_nudge.enabled);
     }
 
     #[test]
-    fn todo_gate_enable_does_not_disturb_nudge() {
-        // Remote opt-in (or `[reminder.todo_gate] enabled = true` local
-        // config) flips the gate to on without touching the periodic
-        // TodoNudge as a side-effect.
+    fn todo_gate_disable_does_not_disturb_nudge() {
+        // Remote kill-switch (or an explicit local disable) flips the
+        // gate off without touching the periodic TodoNudge as a
+        // side-effect.
         let mut policy = ReminderPolicy::default();
-        policy.todo_gate.enabled = true;
-        assert!(policy.todo_gate.enabled);
+        policy.todo_gate.enabled = false;
+        assert!(!policy.todo_gate.enabled);
         assert!(policy.todo_nudge.enabled, "TodoNudge must stay enabled");
         assert!(policy.enabled, "global enable must stay true");
     }

@@ -4,8 +4,7 @@ use super::{
 };
 use crate::session::persistence::PersistenceMsg;
 use crate::util::config::RemoteSettings;
-use xai_grok_agent::AgentDefinition;
-use xai_grok_agent::prompt::context::{PromptAudience, TemplateOverride};
+use xai_grok_agent::prompt::context::PromptAudience;
 use xai_grok_agent::system_reminder::{
     DEFAULT_TODO_GATE_MAX_FIRES, ReminderPolicy, TodoGateConfig,
 };
@@ -25,7 +24,7 @@ fn remote_none_preserves_built_in_defaults() {
     assert_eq!(
         policy.todo_gate,
         TodoGateConfig {
-            enabled: false,
+            enabled: true,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
         },
     );
@@ -33,7 +32,7 @@ fn remote_none_preserves_built_in_defaults() {
     assert!(policy.todo_nudge.enabled);
 }
 #[test]
-fn remote_disable_matches_default_path() {
+fn remote_disable_explicitly_turns_gate_off() {
     let remote = remote_with_todo_gate(Some(false), None);
     let policy = resolve_reminder_policy(Some(&remote), false);
     assert_eq!(
@@ -45,7 +44,7 @@ fn remote_disable_matches_default_path() {
     );
 }
 #[test]
-fn remote_enable_true_overrides_default() {
+fn remote_enable_true_keeps_gate_on() {
     let remote = remote_with_todo_gate(Some(true), None);
     let policy = resolve_reminder_policy(Some(&remote), false);
     assert_eq!(
@@ -57,13 +56,13 @@ fn remote_enable_true_overrides_default() {
     );
 }
 #[test]
-fn remote_cap_override_applies_without_enabling_gate() {
+fn remote_cap_override_keeps_default_enabled() {
     let remote = remote_with_todo_gate(None, Some(5));
     let policy = resolve_reminder_policy(Some(&remote), false);
     assert_eq!(
         policy.todo_gate,
         TodoGateConfig {
-            enabled: false,
+            enabled: true,
             max_fires_per_prompt: 5,
         },
     );
@@ -91,7 +90,7 @@ fn remote_settings_deserializes_without_todo_gate_fields() {
     assert_eq!(
         policy.todo_gate,
         TodoGateConfig {
-            enabled: false,
+            enabled: true,
             max_fires_per_prompt: DEFAULT_TODO_GATE_MAX_FIRES,
         },
     );
@@ -116,11 +115,6 @@ fn remote_settings_preserves_false_and_zero_todo_gate_fields() {
     assert_eq!(settings.todo_gate_enabled, Some(false));
     assert_eq!(settings.todo_gate_max_fires_per_prompt, Some(0));
 }
-fn def_with_template(tpl: TemplateOverride) -> AgentDefinition {
-    let mut def = AgentDefinition::default_grok_build();
-    def.system_prompt = tpl;
-    def
-}
 fn policy_with_gate(enabled: bool) -> ReminderPolicy {
     let mut p = ReminderPolicy::default();
     p.todo_gate.enabled = enabled;
@@ -129,7 +123,6 @@ fn policy_with_gate(enabled: bool) -> ReminderPolicy {
 use crate::session::goal_tracker::GoalStatus;
 #[test]
 fn laziness_injection_active_predicate_matrix() {
-    let def = def_with_template(TemplateOverride::None);
     let policy_on = policy_with_gate(true);
     for (goal_harness_enabled, goal_status, expect) in [
         (false, None, false),
@@ -144,21 +137,20 @@ fn laziness_injection_active_predicate_matrix() {
             expect,
             "goal_harness_enabled={goal_harness_enabled} status={goal_status:?}",
         );
-        assert!(
-            !todo_gate_active(
+        assert_eq!(
+            todo_gate_active(
                 &policy_on,
                 PromptAudience::Primary,
-                &def,
                 goal_harness_enabled,
                 goal_status,
             ),
-            "todo gate must be suppressed during the active goal loop",
+            !expect,
+            "todo gate must be suppressed exactly while the active goal loop owns continuation",
         );
     }
 }
 #[test]
 fn todo_gate_active_predicate_matrix() {
-    let def = def_with_template(TemplateOverride::None);
     let policy_off = policy_with_gate(false);
     let policy_on = policy_with_gate(true);
     for (policy, audience, goal_harness_enabled, goal_status, expect) in [
@@ -185,18 +177,20 @@ fn todo_gate_active_predicate_matrix() {
             Some(GoalStatus::Active),
             false,
         ),
-        (&policy_on, PromptAudience::Primary, false, None, false),
+        (&policy_on, PromptAudience::Primary, false, None, true),
         (
             &policy_on,
             PromptAudience::Primary,
             false,
             Some(GoalStatus::Active),
-            false,
+            true,
         ),
-        (&policy_on, PromptAudience::Primary, true, None, false),
+        (&policy_on, PromptAudience::Primary, true, None, true),
+        (&policy_on, PromptAudience::Subagent, false, None, false),
+        (&policy_on, PromptAudience::Subagent, true, None, false),
     ] {
         assert_eq!(
-            todo_gate_active(policy, audience, &def, goal_harness_enabled, goal_status),
+            todo_gate_active(policy, audience, goal_harness_enabled, goal_status),
             expect,
             "gate.enabled={} audience={audience:?} goal_harness_enabled={goal_harness_enabled} status={goal_status:?}",
             policy.todo_gate.enabled
@@ -211,29 +205,9 @@ fn todo_gate_active_predicate_matrix() {
         GoalStatus::BudgetLimited,
     ] {
         assert!(
-            !todo_gate_active(
-                &policy_on,
-                PromptAudience::Primary,
-                &def,
-                true,
-                Some(status)
-            ),
-            "non-active status {status:?} must not enable gate"
+            todo_gate_active(&policy_on, PromptAudience::Primary, true, Some(status)),
+            "non-active goal status {status:?} must not suppress the gate"
         );
-    }
-    let mut templates = vec![
-        TemplateOverride::None,
-        TemplateOverride::Codex,
-        TemplateOverride::Custom("custom".into()),
-    ];
-    for tpl in templates {
-        let def = def_with_template(tpl);
-        for audience in [PromptAudience::Primary, PromptAudience::Subagent] {
-            assert!(
-                !todo_gate_active(&policy_on, audience, &def, true, None),
-                "built-in template without active goal must not enable gate"
-            );
-        }
     }
 }
 use chrono::NaiveDate;

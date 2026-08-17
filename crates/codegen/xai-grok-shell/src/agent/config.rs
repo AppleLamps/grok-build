@@ -1512,10 +1512,10 @@ pub struct Config {
     /// Whether the runtime turn-end TodoGate is force-enabled via the
     /// `--todo-gate` CLI flag. Session-scoped — not persisted. When
     /// true, flips the runtime policy's `enabled` bit on regardless of
-    /// remote settings or the built-in default (which is `false`).
-    /// The gate runs only while a `/goal` is active (goal reminders
-    /// inject `<task_completion_discipline>`); global built-in templates
-    /// do not activate it.
+    /// remote settings or the built-in default. Remote
+    /// `todo_gate_enabled = false` remains the kill-switch when this
+    /// flag is unset. The gate runs for primary coding sessions and is
+    /// suppressed while a `/goal` loop is active.
     #[serde(skip)]
     pub todo_gate: bool,
     /// Path for the Layer-3 LazinessDetector debug log

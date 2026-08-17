@@ -9,7 +9,7 @@
 //! with no in-band recovery.
 //!
 //! The concrete injector that first hit this was the action-stationarity
-//! nudge (8 consecutive identical tool calls). The invariant is broader:
+//! nudge (consecutive identical tool calls). The invariant is broader:
 //! **no mid-turn user injection may leave duplicate results for one id.**
 //! The nudge is only the driver that reaches the vulnerable window.
 //!
@@ -33,7 +33,7 @@ use xai_grok_test_support::{MockInferenceServer, ScriptedResponse};
 /// literal so this suite does not couple to the private latch constants;
 /// changing the threshold still trips the same history invariant as long as
 /// a nudge is delivered mid-turn after identical calls.
-const IDENTICAL_CALLS_TO_TRIP_NUDGE: usize = 8;
+const IDENTICAL_CALLS_TO_TRIP_NUDGE: usize = 3;
 
 const TODO_ARGS: &str = r#"{"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
 
@@ -89,7 +89,7 @@ fn tool_results_by_call_id(conv: &[ConversationItem]) -> HashMap<String, Vec<Str
     by_id
 }
 
-/// Mid-turn system reminder (stationarity nudge after 8 identical tool calls)
+/// Mid-turn system reminder (stationarity nudge after identical tool calls)
 /// must not fabricate a phantom cancel that duplicates a live tool's result.
 ///
 /// Pre-fix this failed: the nudge was pushed after the assistant `tool_use`

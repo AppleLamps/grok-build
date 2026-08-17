@@ -106,7 +106,7 @@ pub(crate) const DESCRIPTION_FULL: &str = r#"Read a file.
 Usage:
 - The ${{ params.read.target_file }} parameter can be a relative path in the workspace or an absolute path
 - By default, it reads up to {max_lines_read} lines starting from the beginning of the file
-- Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line
+- Line numbers (1-based) appear on every returned line in the format LINE_NUMBER→LINE_CONTENT. That prefix is not part of the file.
 - This tool can read PDF files (.pdf), PowerPoint files (.pptx), Jupyter notebooks (.ipynb files), and image files (e.g. PNG, JPG, etc).
 - When reading an image file the contents are presented visually as this tool uses multimodal LLMs."#;
 /// Schema-only advertised default (runtime still treats omit as line 1 via unwrap_or).
@@ -284,13 +284,8 @@ pub fn extract_file_content_lines(
             None => Cow::Borrowed(line),
         };
         let line_num = i + 1;
-        if is_first_visible || line_num.is_multiple_of(10) {
-            _ = write!(&mut output, "{line_num}→{line}").ok();
-            _ = write!(&mut output_concise, "{line_num}→{line}").ok();
-        } else {
-            output.push_str(&line);
-            output_concise.push_str(&line);
-        }
+        _ = write!(&mut output, "{line_num}→{line}").ok();
+        _ = write!(&mut output_concise, "{line_num}→{line}").ok();
     }
     if has_trailing_empty {
         let trailing_line_idx = split_count;
@@ -303,10 +298,8 @@ pub fn extract_file_content_lines(
                 output.push('\n');
                 output_concise.push('\n');
             }
-            if is_first_visible || line_num.is_multiple_of(10) {
-                _ = write!(&mut output, "{line_num}→").ok();
-                _ = write!(&mut output_concise, "{line_num}→").ok();
-            }
+            _ = write!(&mut output, "{line_num}→").ok();
+            _ = write!(&mut output_concise, "{line_num}→").ok();
         }
     }
     let mut raw_output = if first_line.is_none() || file_content.is_empty() {
@@ -1113,7 +1106,7 @@ mod tests {
             .unwrap();
         match result {
             ReadFileOutput::FileContent(content) => {
-                assert_eq!(content.content, "1→hello\n");
+                assert_eq!(content.content, "1→hello\n2→");
                 assert_eq!(content.total_lines, 2);
             }
             other => panic!("Expected FileContent, got {:?}", other),
@@ -1138,7 +1131,7 @@ mod tests {
         match result {
             ReadFileOutput::FileContent(content) => {
                 let concise = content.content_concise.unwrap();
-                assert_eq!(concise, "1→hello\nworld\n");
+                assert_eq!(concise, "1→hello\n2→world\n3→");
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
@@ -1279,8 +1272,8 @@ mod tests {
     #[test]
     fn test_extract_file_content_lines_basic() {
         let extracted = extract_file_content_lines("1\n2\r\n3\n", None, None, 4);
-        assert_eq!(extracted.content, "1→1\n2\n3\n");
-        assert_eq!(extracted.content_concise, "1→1\n2\n3\n");
+        assert_eq!(extracted.content, "1→1\n2→2\n3→3\n4→");
+        assert_eq!(extracted.content_concise, "1→1\n2→2\n3→3\n4→");
         assert_eq!(extracted.raw_output, "1\n2\r\n3\n");
     }
     /// Regression: a long single-line base64 URI used to be cut
@@ -1332,7 +1325,8 @@ mod tests {
         );
         assert!(!extracted.content.contains(&payload));
     }
-    /// No-op fast path: ordinary file content round-trips byte-equal.
+    /// Data-URI extraction must not rewrite ordinary source lines; only
+    /// the `LINE_NUMBER→` prefix is added.
     #[test]
     fn extract_leaves_non_data_uri_lines_untouched() {
         let file_content = "fn main() {\n    println!(\"hello\");\n}\n";
@@ -1340,22 +1334,22 @@ mod tests {
         let extracted = extract_file_content_lines(file_content, None, None, total_lines);
         assert_eq!(
             extracted.content,
-            "1→fn main() {\n    println!(\"hello\");\n}\n"
+            "1→fn main() {\n2→    println!(\"hello\");\n3→}\n4→"
         );
         assert!(extracted.extracted_images.is_empty());
     }
     #[test]
     fn test_extract_file_content_lines_with_offset() {
         let extracted = extract_file_content_lines("1\n2\n3\r\n4\r", Some(3), None, 4);
-        assert_eq!(extracted.content, "3→3\n4\r".to_owned());
-        assert_eq!(extracted.content_concise, "3→3\n4\r".to_owned());
+        assert_eq!(extracted.content, "3→3\n4→4\r".to_owned());
+        assert_eq!(extracted.content_concise, "3→3\n4→4\r".to_owned());
         assert_eq!(extracted.raw_output, "3\r\n4\r".to_owned());
     }
     #[test]
     fn test_extract_file_content_lines_with_offset_and_limit() {
         let extracted = extract_file_content_lines("1\n2\n3\r\n4\r", Some(2), Some(2), 4);
-        assert_eq!(extracted.content, "2→2\n3".to_owned());
-        assert_eq!(extracted.content_concise, "2→2\n3".to_owned());
+        assert_eq!(extracted.content, "2→2\n3→3".to_owned());
+        assert_eq!(extracted.content_concise, "2→2\n3→3".to_owned());
         assert_eq!(extracted.raw_output, "2\n3\n".to_owned());
     }
     #[test]
@@ -1630,7 +1624,7 @@ mod tests {
         let extracted = extract_file_content_lines(file_content, None, None, total_lines);
         assert_eq!(
             extracted.content,
-            "1→use std::io;\n\nfn main() {\n    println!(\"Hello, world!\");\n}\n"
+            "1→use std::io;\n2→\n3→fn main() {\n4→    println!(\"Hello, world!\");\n5→}\n6→"
         );
     }
     #[test]
@@ -1638,7 +1632,7 @@ mod tests {
         let file_content = "line1\nline2\nline3\nline4\nline5\n";
         let total_lines = 6;
         let extracted = extract_file_content_lines(file_content, Some(2), Some(2), total_lines);
-        assert_eq!(extracted.content, "2→line2\nline3");
+        assert_eq!(extracted.content, "2→line2\n3→line3");
     }
     #[test]
     fn extract_file_content_lines_compaction_reread_scenario() {
@@ -1667,21 +1661,22 @@ impl Config {
             extract_file_content_lines(file_content, None, effective_limit, total_lines);
         let expected = "\
 1→use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Config {
-    pub name: String,
-    pub port: u16,
-}
-
-impl Config {
-10\u{2192}    pub fn new(name: &str, port: u16) -> Self {
-        Self {
-            name: name.to_string(),
-            port,
-        }
-    }
-}
+2→
+3→#[derive(Debug, Serialize, Deserialize)]
+4→pub struct Config {
+5→    pub name: String,
+6→    pub port: u16,
+7→}
+8→
+9→impl Config {
+10→    pub fn new(name: &str, port: u16) -> Self {
+11→        Self {
+12→            name: name.to_string(),
+13→            port,
+14→        }
+15→    }
+16→}
+17→
 ";
         assert_eq!(extracted.content, expected);
         let truncated = effective_limit.map(|l| l < total_lines).unwrap_or(false);
@@ -1730,16 +1725,17 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             extract_file_content_lines(&file_content, None, effective_limit, total_lines);
         let expected = "\
 1→use jwt::Claims;
-use actix_web::HttpRequest;
-
-pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
-    let token = req.headers()
-        .get(\"Authorization\")
-        .ok_or(Error::Missing)?
-        .to_str()
-        .map_err(|_| Error::Invalid)?;
-10\u{2192}    jwt::decode(token)
-}
+2→use actix_web::HttpRequest;
+3→
+4→pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
+5→    let token = req.headers()
+6→        .get(\"Authorization\")
+7→        .ok_or(Error::Missing)?
+8→        .to_str()
+9→        .map_err(|_| Error::Invalid)?;
+10→    jwt::decode(token)
+11→}
+12→
 ";
         assert_eq!(extracted.content, expected);
         let truncated = effective_limit.map(|l| l < total_lines).unwrap_or(false);
@@ -1768,7 +1764,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         let effective_limit = Some(limit.min(max_reread_lines));
         let extracted =
             extract_file_content_lines(&file_content, offset, effective_limit, total_lines);
-        assert_eq!(extracted.content, "4→line_four\nline_five\nline_six");
+        assert_eq!(extracted.content, "4→line_four\n5→line_five\n6→line_six");
         let truncated = effective_limit.map(|l| l < total_lines).unwrap_or(false);
         assert!(
             truncated,
@@ -2599,27 +2595,27 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         let file_content = "line1\nline2\nline3\nline4\nline5\n";
         let total_lines = file_content.matches('\n').count() + 1;
         let extracted = extract_file_content_lines(file_content, Some(-2), Some(2), total_lines);
-        assert_eq!(extracted.content, "5→line5\n");
+        assert_eq!(extracted.content, "5→line5\n6→");
     }
     #[test]
     fn extract_first_line_always_numbered_small_read() {
         let extracted = extract_file_content_lines("a\nb\nc\n", None, None, 4);
-        assert_eq!(extracted.content, "1→a\nb\nc\n");
-        assert_eq!(extracted.content_concise, "1→a\nb\nc\n");
+        assert_eq!(extracted.content, "1→a\n2→b\n3→c\n4→");
+        assert_eq!(extracted.content_concise, "1→a\n2→b\n3→c\n4→");
     }
     #[test]
     fn extract_first_visible_line_numbered_with_offset() {
         let file_content = "a\nb\nc\nd\ne\n";
         let extracted = extract_file_content_lines(file_content, Some(3), None, 6);
-        assert_eq!(extracted.content, "3→c\nd\ne\n");
+        assert_eq!(extracted.content, "3→c\n4→d\n5→e\n6→");
     }
     #[test]
-    fn extract_decade_line_numbered_in_addition_to_first() {
+    fn extract_every_returned_line_numbered() {
         let file_content: String = (1..=12).map(|i| format!("L{i}\n")).collect();
         let extracted = extract_file_content_lines(&file_content, None, None, 13);
         assert_eq!(
             extracted.content,
-            "1→L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\n10→L10\nL11\nL12\n"
+            "1→L1\n2→L2\n3→L3\n4→L4\n5→L5\n6→L6\n7→L7\n8→L8\n9→L9\n10→L10\n11→L11\n12→L12\n13→"
         );
     }
     /// Reviewer case: a window that resolves to only an empty line (here the

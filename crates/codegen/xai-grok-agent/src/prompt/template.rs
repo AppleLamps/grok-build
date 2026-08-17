@@ -591,9 +591,8 @@ mod tests {
     //
     // The `<task_completion_discipline>` block was removed from both
     // base and subagent templates. These tests pin the deletion so the
-    // block doesn't accidentally come back, and so the runtime TodoGate
-    // doesn't start firing reminders that reference a non-existent
-    // block.
+    // block doesn't accidentally come back. TodoGate reminders no longer
+    // cite that tag.
 
     #[test]
     fn task_completion_discipline_block_is_not_rendered() {

@@ -161,10 +161,8 @@ impl Agent {
 
     /// Audience this agent's prompt was rendered for (Primary or Subagent).
     ///
-    /// Used by the runtime turn-end TodoGate together with
-    /// [`crate::AgentDefinition::carries_task_completion_discipline`] to
-    /// decide whether the active prompt actually carries the discipline
-    /// rules the gate's reminder text invokes.
+    /// Used by the runtime turn-end TodoGate: the gate runs for the
+    /// primary audience and is suppressed for subagents.
     pub fn prompt_audience(&self) -> crate::prompt::context::PromptAudience {
         self.prompt_context.audience
     }

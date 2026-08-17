@@ -182,7 +182,7 @@ mod tests {
             .unwrap();
         match result {
             ReadFileOutput::FileContent(content) => {
-                assert_eq!(content.content, "1→hello\nworld\n");
+                assert_eq!(content.content, "1→hello\n2→world\n3→");
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }

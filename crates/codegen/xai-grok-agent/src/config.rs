@@ -1423,12 +1423,9 @@ impl AgentDefinition {
     /// True iff the active system prompt template for `audience` carries
     /// the `<task_completion_discipline>` block.
     ///
-    /// Used by the runtime turn-end TodoGate to gate firing on sessions
-    /// whose prompt actually references the rules the gate's reminder
-    /// text invokes. The block has been removed from every built-in
-    /// template, so this returns `false` unconditionally. Kept as a
-    /// helper so the gate's call-site stays stable in case the block
-    /// is reintroduced behind a future flag.
+    /// The block has been removed from every built-in template, so this
+    /// returns `false` unconditionally. Kept as a helper so a future
+    /// flag can reintroduce the block without renaming call-sites.
     pub fn carries_task_completion_discipline(
         &self,
         _audience: crate::prompt::context::PromptAudience,

@@ -750,8 +750,9 @@ pub struct PagerArgs {
     /// Enable the runtime turn-end TodoGate for this session.
     ///
     /// Session-scoped (not persisted). Highest precedence —
-    /// overrides remote `todo_gate_enabled` and the built-in
-    /// default (which is `false`).
+    /// overrides remote `todo_gate_enabled` and force-enables even
+    /// when remote has disabled the gate. The built-in default is
+    /// already `true`.
     #[arg(long = "todo-gate", hide = true)]
     pub todo_gate: bool,
     /// Set the installer field in config.toml.

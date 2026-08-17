@@ -2901,7 +2901,7 @@ mod tests {
             .expect("read_file concise should succeed");
         match &result.output {
             ToolOutput::ReadFile(ReadFileOutput::FileContent(fc)) => {
-                assert_eq!(fc.content, "1→hello\nworld\n");
+                assert_eq!(fc.content, "1→hello\n2→world\n3→");
             }
             other => panic!("Expected ReadFile(FileContent), got: {other:?}"),
         }

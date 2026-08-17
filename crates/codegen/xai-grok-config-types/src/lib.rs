@@ -586,9 +586,9 @@ pub struct RemoteSettings {
     #[serde(default, deserialize_with = "deserialize_tolerant")]
     pub worktree_auto_gc: Option<WorktreeAutoGcSettings>,
     /// Enable/disable the runtime turn-end TodoGate remotely.
-    /// Precedence: CLI `--todo-gate` > this field > built-in default (`false`).
-    /// The gate ships disabled; set this to `Some(true)` (via the
-    /// `grok_build_settings` remote settings key) to enable it. See
+    /// Precedence: CLI `--todo-gate` > this field > built-in default (`true`).
+    /// The gate ships enabled; set this to `Some(false)` (via the
+    /// `grok_build_settings` remote settings key) to disable it. See
     /// `session::acp_session::resolve_reminder_policy`.
     #[serde(default)]
     pub todo_gate_enabled: Option<bool>,
