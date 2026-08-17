@@ -737,7 +737,7 @@ pub struct RemoteSettings {
     /// recent tail (pass 2 → final summary), keeping summarizer latency off the
     /// critical path. `Some(true)` enables (remote rollout), `Some(false)` forces
     /// off, `None` falls back to `[features] two_pass_compaction` /
-    /// `GROK_TWO_PASS_COMPACTION` / default (off).
+    /// `GROK_TWO_PASS_COMPACTION` / default (on).
     #[serde(default)]
     pub two_pass_compaction_enabled: Option<bool>,
     /// Dynamic tip list from remote settings. When present with non-empty entries,

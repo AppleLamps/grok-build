@@ -51,9 +51,18 @@ pub(crate) fn subagent_template() -> Zeroizing<String> {
     decrypt(SUBAGENT_PROMPT_ENC, PROMPT_SEEDS[2])
 }
 
-/// The compact system prompt used after conversation compaction.
+/// The compact system prompt used after conversation compaction and in concise
+/// mode. Must keep enough work-policy that a successor can continue the task
+/// after full-replace summarization — not just identity.
 pub const COMPACT_SYSTEM_PROMPT: &str = "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-     Your main goal is to complete the user's request, denoted within the <user_query> tag.";
+     Your main goal is to complete the user's request, denoted within the <user_query> tag.\n\n\
+     <work_policy>\n\
+     - Keep every explicit requirement of the request in view until it is completed, superseded by the user, or genuinely blocked. If something is blocked, say so plainly rather than quietly dropping it.\n\
+     - Prefer dedicated file tools over shell for reads and edits. Match old_string exactly as it appears in the file, without line-number prefixes.\n\
+     - An empty old_string creates a new file and must not overwrite an existing non-empty file. Read a file before editing it.\n\
+     - Claim that something is done, fixed, tested, or addressed only when tool output supports the claim.\n\
+     - Do not end the turn with unfinished todos or an in-progress edit; continue until the request is complete or genuinely blocked.\n\
+     </work_policy>";
 
 #[cfg(test)]
 mod tests {
@@ -326,10 +335,21 @@ mod tests {
 
     #[test]
     fn test_compact_prompt_matches_expected() {
-        assert_eq!(
-            COMPACT_SYSTEM_PROMPT,
-            "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-             Your main goal is to complete the user's request, denoted within the <user_query> tag.",
+        assert!(
+            COMPACT_SYSTEM_PROMPT.contains("You are an AI coding agent"),
+            "compact prompt must keep agent identity"
+        );
+        assert!(
+            COMPACT_SYSTEM_PROMPT.contains("<user_query>"),
+            "compact prompt must reference user_query"
+        );
+        assert!(
+            COMPACT_SYSTEM_PROMPT.contains("<work_policy>"),
+            "compact prompt must keep work_policy so successors retain agency"
+        );
+        assert!(
+            COMPACT_SYSTEM_PROMPT.contains("unfinished todos"),
+            "compact prompt must tell the successor not to stop with open work"
         );
     }
 

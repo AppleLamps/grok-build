@@ -121,11 +121,11 @@ fn with_grok_memory<T>(value: &str, f: impl FnOnce() -> T) -> T {
     with_env_var_opt("GROK_MEMORY", Some(value), f)
 }
 #[test]
-fn memory_config_default_disabled() {
+fn memory_config_default_enabled() {
     without_grok_memory(|| {
         let config = toml::Value::Table(toml::map::Map::new());
         let mem = MemoryConfig::resolve(false, false, &config, None);
-        assert!(!mem.enabled);
+        assert!(mem.enabled, "memory defaults on so compaction can flush");
     });
 }
 #[test]
@@ -361,6 +361,7 @@ fn memory_config_defaults_are_correct() {
     without_grok_memory(|| {
         let config = toml::Value::Table(toml::map::Map::new());
         let mem = MemoryConfig::resolve(false, false, &config, None);
+        assert!(mem.enabled, "memory defaults on so compaction can flush");
         assert_eq!(mem.index.max_chunk_chars, 1600);
         assert_eq!(mem.index.chunk_overlap_chars, 320);
         assert_eq!(mem.embedding.provider, "api");

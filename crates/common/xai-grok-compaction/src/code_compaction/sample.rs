@@ -9,8 +9,9 @@
 //!
 //! Classification is uniform:
 //! - a usable, non-degenerate response wins immediately;
-//! - empty / degenerate responses ([`is_degenerate_summary`]) are **transient**
-//!   and retried until `max_attempts` is hit;
+//! - empty / degenerate responses ([`is_degenerate_summary`]) and 9-section
+//!   summaries missing agency headings ([`summary_lacks_agency_sections`])
+//!   are **transient** and retried until `max_attempts` is hit;
 //! - a sampler error is **deterministic** (no retry) when
 //!   [`CompactionSampleError::is_deterministic`](crate::CompactionSampleError::is_deterministic)
 //!   or a context-length overflow ([`is_context_length_error`]); otherwise it is
@@ -32,7 +33,7 @@ use crate::sampler::CompactionSampler;
 
 use super::failure::is_context_length_error;
 use super::observer::{FullReplaceAttemptOutcome, FullReplaceObserver};
-use super::summary::is_degenerate_summary;
+use super::summary::{is_degenerate_summary, summary_lacks_agency_sections};
 
 /// A successful retry-bounded sample: the **raw** winning summary (uncleaned)
 /// plus the total number of attempts made (first try + retries).
@@ -98,7 +99,9 @@ where
             Ok(output) if !output.response.trim().is_empty() => {
                 // Reject summaries whose cleaned seed is too short;
                 // retry like a transient failure.
-                if is_degenerate_summary(&output.response) {
+                if is_degenerate_summary(&output.response)
+                    || summary_lacks_agency_sections(&output.response)
+                {
                     observer.on_attempt(
                         attempt,
                         &FullReplaceAttemptOutcome::Degenerate {
@@ -368,5 +371,22 @@ mod tests {
         let sampler = MockSampler::scripted(vec![Ok(String::new()), Ok(short.into())]);
         let err = run(&sampler, 2).await.expect_err("should fail");
         assert!(matches!(err, SampleRetryError::Empty { attempts: 2 }));
+    }
+
+    #[tokio::test]
+    async fn nine_section_summary_missing_current_work_retries() {
+        let missing_current = format!(
+            "<summary>\n1. Primary Request and Intent: fix the bug\n\
+             3. Files and Code Sections: src/lib.rs\n\
+             6. All User Messages: please fix it\n\
+             7. Pending Tasks: write the test\n{}\n</summary>",
+            "y".repeat(500)
+        );
+        let sampler = MockSampler::scripted(vec![Ok(missing_current), Ok(healthy())]);
+        let out = run(&sampler, 3)
+            .await
+            .expect("should succeed after agency retry");
+        assert_eq!(out.attempts, 2);
+        assert_eq!(sampler.call_count(), 2);
     }
 }

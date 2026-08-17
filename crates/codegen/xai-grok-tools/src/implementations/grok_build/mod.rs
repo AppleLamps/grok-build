@@ -14,6 +14,7 @@ pub mod bash;
 pub mod deploy_app;
 pub mod enter_plan_mode;
 pub mod exit_plan_mode;
+pub mod file_read_tracker;
 pub mod grep;
 pub mod image_edit;
 pub mod image_gen;

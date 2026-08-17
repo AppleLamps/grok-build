@@ -608,7 +608,8 @@ impl MemoryConfig {
                 .cli(memory_enabled_override)
                 .config(memory.enabled)
                 .feature_flag(remote.and_then(|settings| settings.memory_enabled))
-                .default(false)
+                // Default on so pre-compaction memory flush actually runs.
+                .default(true)
                 .resolve()
                 .value,
             index: MemoryIndexConfig {

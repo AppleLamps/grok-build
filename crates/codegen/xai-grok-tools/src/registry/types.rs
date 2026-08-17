@@ -1101,9 +1101,17 @@ impl ToolRegistryBuilder {
         resources.register_state::<crate::implementations::grok_build::todo::TodoState>();
         resources.register_state::<crate::types::resources::WebCitationCounter>();
         resources
-            .register_state::<
-                crate::implementations::cursor_rules_on_read::CursorRulesOnReadTracker,
-            >();
+            .register_state::<crate::implementations::cursor_rules_on_read::CursorRulesOnReadTracker>(
+            );
+        resources.register_state::<crate::implementations::grok_build::file_read_tracker::FileReadTracker>(
+        );
+        // Insert an empty tracker so read-before-edit is live from session
+        // start. `register_state` only wires serialization; without a value,
+        // `contains::<State<FileReadTracker>>()` is false and the gate is a
+        // no-op. Persistence load below overwrites this with saved paths.
+        resources.insert(crate::types::resources::State(
+            crate::implementations::grok_build::file_read_tracker::FileReadTracker::default(),
+        ));
         resources
             .register_state::<crate::implementations::grok_build::scheduler::types::SchedulerState>(
             );

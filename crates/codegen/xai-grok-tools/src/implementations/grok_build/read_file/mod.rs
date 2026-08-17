@@ -459,10 +459,25 @@ pub(crate) async fn run_read_file(
             )
             .await;
         }
+        if matches!(output, ReadFileOutput::FileContent(_)) {
+            crate::implementations::grok_build::file_read_tracker::record_read(
+                &resources,
+                path.clone(),
+            )
+            .await;
+        }
         return Ok(output);
     }
     if extension == "pptx" {
-        return handle_pptx(file_bytes, &path).await;
+        let output = handle_pptx(file_bytes, &path).await?;
+        if matches!(output, ReadFileOutput::FileContent(_)) {
+            crate::implementations::grok_build::file_read_tracker::record_read(
+                &resources,
+                path.clone(),
+            )
+            .await;
+        }
+        return Ok(output);
     }
     if crate::util::binary::is_binary(&extension, &file_bytes) {
         tracing::info!(
@@ -480,6 +495,8 @@ pub(crate) async fn run_read_file(
     let file_content = String::from_utf8_lossy(&file_bytes).into_owned();
     if file_content.is_empty() {
         let stored_offset = stored_read_offset(input.offset);
+        crate::implementations::grok_build::file_read_tracker::record_read(&resources, path.clone())
+            .await;
         return Ok(ReadFileOutput::FileContent(FileContent {
             content: String::new(),
             content_concise: None,
@@ -581,6 +598,8 @@ pub(crate) async fn run_read_file(
         &mut content_concise,
     )
     .await;
+    crate::implementations::grok_build::file_read_tracker::record_read(&resources, path.clone())
+        .await;
     Ok(ReadFileOutput::FileContent(FileContent {
         content,
         content_concise,
