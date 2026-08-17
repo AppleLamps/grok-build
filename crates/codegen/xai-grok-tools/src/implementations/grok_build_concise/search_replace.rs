@@ -1,6 +1,8 @@
 //! Concise variant of the `search_replace` tool.
 
-use crate::implementations::grok_build::search_replace::{SearchReplaceInput, run_search_replace};
+use crate::implementations::grok_build::search_replace::{
+    SearchReplaceInput, run_search_replace_skipping_read_gate,
+};
 
 /// Concise description — no read-before-edit enforcement, simplified formatting guidance.
 const DESCRIPTION_CONCISE: &str = r#"Replace an exact string in a file.
@@ -89,7 +91,7 @@ impl xai_tool_runtime::Tool for SearchReplaceConciseTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let mut result = run_search_replace(input, &ctx, resources).await?;
+        let mut result = run_search_replace_skipping_read_gate(input, &ctx, resources).await?;
 
         if let SearchReplaceOutput::EditsApplied(ref mut applied) = result
             && let Some(concise_text) = applied.tool_output_for_prompt_concise.take()

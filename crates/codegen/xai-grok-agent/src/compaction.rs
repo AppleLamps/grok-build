@@ -29,7 +29,8 @@ pub struct CompactionPolicy {
     /// speculatively summarize the history prefix in the background (pass 1);
     /// at compaction, summarize NOTE₁ + the recent tail (pass 2). Resolved from
     /// config (`two_pass_compaction` flag) at session build; `false` keeps the
-    /// legacy single-pass path. Default `false` (real sessions set it from config).
+    /// legacy single-pass path. Default `true` so long sessions keep file paths
+    /// and current work; real sessions still override from config.
     pub two_pass_enabled: bool,
 }
 
@@ -38,9 +39,28 @@ impl Default for CompactionPolicy {
         Self {
             auto_compact_threshold_percent: 85,
             compact_model: None,
-            memory_flush_enabled: false,
+            memory_flush_enabled: true,
             wall_clock_budget_secs: 300,
-            two_pass_enabled: false,
+            two_pass_enabled: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_preserve_agency() {
+        let policy = CompactionPolicy::default();
+        assert_eq!(policy.auto_compact_threshold_percent, 85);
+        assert!(
+            policy.memory_flush_enabled,
+            "pre-compaction flush must be on so long sessions keep current work"
+        );
+        assert!(
+            policy.two_pass_enabled,
+            "two-pass must be on so file paths and current work survive full-replace"
+        );
     }
 }

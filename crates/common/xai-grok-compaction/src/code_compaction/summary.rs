@@ -124,6 +124,30 @@ pub fn is_degenerate_summary(raw_summary: &str) -> bool {
     format_compact_summary(raw_summary).chars().count() < super::config::MIN_SUMMARY_SEED_CHARS
 }
 
+/// True when a grok-build 9-section summary is missing the headings a
+/// successor needs to keep working (request, files, pending tasks, current
+/// work). Two-pass (5-section) and short-prompt summaries do not use those
+/// headings, so they return `false`.
+pub fn summary_lacks_agency_sections(raw_summary: &str) -> bool {
+    let cleaned = format_compact_summary(raw_summary);
+    const NINE_SECTION_MARKERS: [&str; 4] = [
+        "Files and Code",
+        "All User Messages",
+        "Pending Tasks",
+        "Current Work",
+    ];
+    if !NINE_SECTION_MARKERS.iter().any(|marker| cleaned.contains(marker)) {
+        return false;
+    }
+    const REQUIRED: [&str; 4] = [
+        "Primary Request",
+        "Files and Code",
+        "Pending Tasks",
+        "Current Work",
+    ];
+    REQUIRED.iter().any(|heading| !cleaned.contains(heading))
+}
+
 /// Clean tags via [`format_compact_summary`] and prepend the continuation
 /// preamble. This is the user message content that replaces the compacted
 /// conversation.
@@ -158,6 +182,31 @@ mod tests {
             "y".repeat(500)
         );
         assert!(!is_degenerate_summary(&long));
+    }
+
+    #[test]
+    fn agency_sections_ignored_for_two_pass_shape() {
+        let raw = "<summary>\n1. Primary Request and Intent: fix the bug\n\
+             2. Key Technical Concepts: rust\n\
+             3. Errors and Fixes: None\n\
+             4. Problem Solving: None\n\
+             5. Optional Next Step: edit src/lib.rs\n</summary>";
+        assert!(!summary_lacks_agency_sections(raw));
+    }
+
+    #[test]
+    fn agency_sections_required_once_nine_section_form_starts() {
+        let missing_current = "<summary>\n1. Primary Request and Intent: fix the bug\n\
+             3. Files and Code Sections: src/lib.rs\n\
+             6. All User Messages: please fix it\n\
+             7. Pending Tasks: write the test\n</summary>";
+        assert!(summary_lacks_agency_sections(missing_current));
+        let complete = "<summary>\n1. Primary Request and Intent: fix the bug\n\
+             3. Files and Code Sections: src/lib.rs\n\
+             6. All User Messages: please fix it\n\
+             7. Pending Tasks: write the test\n\
+             8. Current Work: editing src/lib.rs\n</summary>";
+        assert!(!summary_lacks_agency_sections(complete));
     }
 
     #[test]

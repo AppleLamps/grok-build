@@ -60,13 +60,12 @@ pub(crate) const DESCRIPTION_FULL: &str = r#"Replace an exact string in a file.
 
 ${% if tools.by_kind.read -%}
 - `${{ tools.by_kind.read }}` prefixes each line with "LINE_NUMBER→". That prefix is not part of the file: match only what comes after the →, with its exact indentation.
+- Call `${{ tools.by_kind.read }}` on an existing path before replacing a string in it.
 ${% endif -%}
 - `${{ params.edit.old_string }}` must match exactly one place in the file. If it appears more than once, add surrounding lines to make it unique, or set `${{ params.edit.replace_all }}` to change every occurrence (handy for renaming an identifier).
 - To create a new file, set `${{ params.edit.old_string }}` to an empty string. An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file."#;
-/// The overwrite-guard sentence in [`DESCRIPTION_FULL`]. Only accurate while
-/// `empty_old_string_does_not_override` is enabled (opt-in; the default is the
-/// legacy overwrite behavior); `versioned_definition` strips it unless a
-/// config enables the guard.
+/// The overwrite-guard sentence in [`DESCRIPTION_FULL`]. Served by default;
+/// `versioned_definition` strips it only when a config opts out of the guard.
 pub(crate) const EMPTY_OLD_STRING_GUARD_SENTENCE: &str =
     " An empty `${{ params.edit.old_string }}` cannot overwrite an existing non-empty file.";
 /// Input for the search_replace tool.
@@ -100,25 +99,24 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchReplaceParams {
-    /// Deprecated runtime no-op, kept so configs still sending it deserialize under
-    /// `deny_unknown_fields`. Still gates the config-time Read-tool requirement (`requires_expr`).
+    /// When true, skip the runtime read-before-edit gate (the file need not
+    /// have been read this session). Still gates the config-time Read-tool
+    /// requirement (`requires_expr`) when false.
     #[serde(default)]
     pub skip_read_before_edit: bool,
-    /// When true (opt-in), an empty `old_string` may only create a new file
+    /// When true, an empty `old_string` may only create a new file
     /// or fill an empty one — it never silently overwrites an existing
-    /// non-empty file. Defaults to false (the legacy behavior): an empty
-    /// `old_string` replaces the file's entire contents. The served
-    /// description includes the guard sentence only when this is enabled
-    /// (see `versioned_definition`).
-    #[serde(default)]
+    /// non-empty file. Defaults to true. The served description includes the
+    /// guard sentence unless a config opts out (see `versioned_definition`).
+    #[serde(default = "default_true")]
     pub empty_old_string_does_not_override: bool,
     /// When true, enable normalized-fallback matching for Unicode confusable
     /// characters (smart quotes, em-dashes, etc.).  When exact byte matching
     /// fails, the tool will retry with confusable-normalized comparison and
     /// perform the replacement if an unambiguous match is found.
     ///
-    /// Default: `false` — disabled until Stage 1 diagnostics are stable.
-    #[serde(default)]
+    /// Default: `true`.
+    #[serde(default = "default_true")]
     pub unicode_normalized_fallback: bool,
     /// When true, append a hint that the user may have changed the file
     /// to `NoMatchesFound` error messages. This nudges the model to re-read
@@ -132,8 +130,8 @@ impl Default for SearchReplaceParams {
     fn default() -> Self {
         Self {
             skip_read_before_edit: false,
-            empty_old_string_does_not_override: false,
-            unicode_normalized_fallback: false,
+            empty_old_string_does_not_override: true,
+            unicode_normalized_fallback: true,
             include_user_edit_hint: true,
         }
     }
@@ -151,6 +149,25 @@ pub(crate) async fn run_search_replace(
     input: SearchReplaceInput,
     ctx: &xai_tool_runtime::ToolCallContext,
     resources: SharedResources,
+) -> Result<SearchReplaceOutput, xai_tool_runtime::ToolError> {
+    run_search_replace_inner(input, ctx, resources, false).await
+}
+
+/// Same as [`run_search_replace`], with an extra skip for the concise toolset
+/// which never enforced read-before-edit.
+pub(crate) async fn run_search_replace_skipping_read_gate(
+    input: SearchReplaceInput,
+    ctx: &xai_tool_runtime::ToolCallContext,
+    resources: SharedResources,
+) -> Result<SearchReplaceOutput, xai_tool_runtime::ToolError> {
+    run_search_replace_inner(input, ctx, resources, true).await
+}
+
+async fn run_search_replace_inner(
+    input: SearchReplaceInput,
+    ctx: &xai_tool_runtime::ToolCallContext,
+    resources: SharedResources,
+    force_skip_read_before_edit: bool,
 ) -> Result<SearchReplaceOutput, xai_tool_runtime::ToolError> {
     let cwd_override = ctx
         .extensions
@@ -211,16 +228,20 @@ pub(crate) async fn run_search_replace(
             "Old string and new string are the same".to_owned(),
         ));
     }
-    let (empty_old_string_does_not_override, include_user_edit_hint);
+    let (empty_old_string_does_not_override, include_user_edit_hint, skip_read_before_edit);
     {
         let res = resources.lock().await;
         let sr_params = res.get::<Params<SearchReplaceParams>>();
         empty_old_string_does_not_override = sr_params
             .map(|p| p.0.empty_old_string_does_not_override)
-            .unwrap_or(false);
+            .unwrap_or(true);
         include_user_edit_hint = sr_params
             .map(|p| p.0.include_user_edit_hint)
             .unwrap_or(true);
+        skip_read_before_edit = force_skip_read_before_edit
+            || sr_params
+                .map(|p| p.0.skip_read_before_edit)
+                .unwrap_or(false);
     }
     let result = if input.old_string.is_empty() {
         handle_new_file_creation(
@@ -237,6 +258,19 @@ pub(crate) async fn run_search_replace(
         )
         .await?
     } else {
+        if !skip_read_before_edit
+            && super::file_read_tracker::requires_prior_read(&resources, &path).await
+            && fs.read_file(&path).await.is_ok()
+        {
+            let read_name = TemplateRenderer::resolve(&resources, "${{ tools.by_kind.read }}")
+                .await
+                .unwrap_or_else(|_| "read_file".to_string());
+            return Ok(SearchReplaceOutput::InvalidInput(format!(
+                "`{read_name}` must be called on {} before editing it. \
+                 Re-read the file and retry the replacement.",
+                input.file_path
+            )));
+        }
         handle_replacement(
             &input,
             resources.clone(),
@@ -253,6 +287,12 @@ pub(crate) async fn run_search_replace(
         .await?
     };
     if let SearchReplaceOutput::EditsApplied(applied) = &result {
+        // Re-canonicalize after a create: the pre-write path may have been
+        // unresolved (NotFound), and a later edit would see the canonical form.
+        let tracked = crate::util::fs::try_canonicalize(&path)
+            .await
+            .unwrap_or_else(|_| path.clone());
+        super::file_read_tracker::record_read(&resources, tracked).await;
         let (mut added, mut removed) = (0i64, 0i64);
         for detail in &applied.edits.details {
             let (a, r) = crate::types::output::line_diff(&detail.old_string, &detail.new_string);
@@ -588,7 +628,8 @@ async fn handle_replacement(
         let fallback_enabled = {
             let res = resources.lock().await;
             res.get::<Params<SearchReplaceParams>>()
-                .is_some_and(|p| p.0.unicode_normalized_fallback)
+                .map(|p| p.0.unicode_normalized_fallback)
+                .unwrap_or(true)
         };
         if fallback_enabled {
             match find_normalized_match_positions(&match_text, &input.old_string) {
@@ -785,9 +826,8 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
         DESCRIPTION_FULL
     }
     /// Params-aware description: the "cannot overwrite" sentence in
-    /// [`DESCRIPTION_FULL`] only holds while `empty_old_string_does_not_override`
-    /// is enabled, so it is served only for configs that opt into the guard and
-    /// stripped by default (legacy overwrite behavior).
+    /// [`DESCRIPTION_FULL`] is the default. It is stripped only when a config
+    /// opts out of `empty_old_string_does_not_override`.
     fn versioned_definition(
         &self,
         _contract_version: Option<&str>,
@@ -829,7 +869,7 @@ impl crate::types::tool_metadata::ToolMetadata for SearchReplaceTool {
     fn requires_expr(&self) -> Expr<ToolRequirement> {
         Expr::And(vec![
             // Unless `skip_read_before_edit` is set, require a Read tool in the toolset
-            // (read-before-edit is encouraged via description and RL grading, not runtime-enforced).
+            // and enforce read-before-edit at runtime via `FileReadTracker`.
             Expr::Value(ToolRequirement::if_params(
                 Expr::Not(Box::new(Expr::Value(ToolParamsRequirement::new(
                     "skip_read_before_edit",
@@ -965,14 +1005,14 @@ mod tests {
         );
         let default_desc = default_def.function.description.unwrap();
         assert!(
-            !default_desc.contains("cannot overwrite"),
-            "guard sentence must be absent by default (legacy overwrite behavior):\n{default_desc}"
+            default_desc.contains("cannot overwrite an existing non-empty file"),
+            "guard sentence must appear by default:\n{default_desc}"
         );
         assert!(
             default_desc.contains("To create a new file"),
             "create-file guidance must remain:\n{default_desc}"
         );
-        let opt_in_def = ToolMetadata::versioned_definition(
+        let opt_out_def = ToolMetadata::versioned_definition(
             &SearchReplaceTool,
             None,
             "search_replace",
@@ -980,12 +1020,12 @@ mod tests {
             &renderer,
             &param_map,
             &schema,
-            &serde_json::json!({"empty_old_string_does_not_override": true}),
+            &serde_json::json!({"empty_old_string_does_not_override": false}),
         );
-        let opt_in_desc = opt_in_def.function.description.unwrap();
+        let opt_out_desc = opt_out_def.function.description.unwrap();
         assert!(
-            opt_in_desc.contains("cannot overwrite an existing non-empty file"),
-            "guard sentence must appear when the guard is enabled:\n{opt_in_desc}"
+            !opt_out_desc.contains("cannot overwrite"),
+            "guard sentence must be absent when the guard is disabled:\n{opt_out_desc}"
         );
     }
     #[test]
@@ -999,8 +1039,8 @@ mod tests {
             "read bullet must render with the resolved name:\n{rendered}"
         );
         assert!(
-            !rendered.contains("before editing it"),
-            "read-before-edit guidance must be gone:\n{rendered}"
+            rendered.contains("on an existing path before replacing"),
+            "read-before-edit guidance must appear when a Read tool exists:\n{rendered}"
         );
         let edit_params = std::collections::HashMap::from([
             ("old_string".to_string(), "old_string".to_string()),
@@ -1014,8 +1054,10 @@ mod tests {
         .render(ToolMetadata::description_template(&SearchReplaceTool))
         .unwrap();
         assert!(
-            !no_read.contains("prefixes each line") && !no_read.contains("- \n"),
-            "read bullet must vanish cleanly without a Read tool:\n{no_read}"
+            !no_read.contains("prefixes each line")
+                && !no_read.contains("before replacing")
+                && !no_read.contains("- \n"),
+            "read bullets must vanish cleanly without a Read tool:\n{no_read}"
         );
     }
     #[tokio::test]
@@ -1065,7 +1107,8 @@ mod tests {
             "harness skip_read_before_edit config must validate against SearchReplaceParams",
         );
     }
-    /// Consecutive edits to the same file succeed without any prior read.
+    /// Consecutive edits to the same file succeed without any prior read
+    /// when `FileReadTracker` is not registered (unit-test harness).
     #[tokio::test]
     async fn consecutive_edits_succeed_without_prior_read() {
         let tmp = TempDir::new().unwrap();
@@ -1099,6 +1142,161 @@ mod tests {
         );
         let content = std::fs::read_to_string(tmp.path().join("test.txt")).unwrap();
         assert_eq!(content, "hi earth\n");
+    }
+    #[tokio::test]
+    async fn edit_without_read_is_rejected_when_tracker_registered() {
+        use crate::implementations::grok_build::file_read_tracker::FileReadTracker;
+        use crate::types::resources::State;
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("test.txt"), "hello world\n").unwrap();
+        let tool = SearchReplaceTool;
+        let mut resources = test_resources(tmp.path());
+        resources.register_state::<FileReadTracker>();
+        resources.insert(State(FileReadTracker::default()));
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input("test.txt", "hello", "hi"),
+        )
+        .await
+        .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("before editing"),
+                    "should tell the model to read first: {msg}"
+                );
+            }
+            other => panic!("Expected InvalidInput, got {other:?}"),
+        }
+        let content = std::fs::read_to_string(tmp.path().join("test.txt")).unwrap();
+        assert_eq!(content, "hello world\n");
+    }
+    #[tokio::test]
+    async fn edit_succeeds_after_recorded_read() {
+        use crate::implementations::grok_build::file_read_tracker::FileReadTracker;
+        use crate::types::resources::State;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.txt");
+        std::fs::write(&path, "hello world\n").unwrap();
+        let canonical = std::fs::canonicalize(&path).unwrap();
+        let tool = SearchReplaceTool;
+        let mut resources = test_resources(tmp.path());
+        resources.register_state::<FileReadTracker>();
+        let mut tracker = FileReadTracker::default();
+        tracker.paths.insert(canonical);
+        resources.insert(State(tracker));
+        let result = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input("test.txt", "hello", "hi"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, SearchReplaceOutput::EditsApplied(_)),
+            "edit after read unexpectedly returned {result:?}"
+        );
+        let content = std::fs::read_to_string(tmp.path().join("test.txt")).unwrap();
+        assert_eq!(content, "hi world\n");
+    }
+    #[tokio::test]
+    async fn consecutive_edits_succeed_after_recorded_read() {
+        use crate::implementations::grok_build::file_read_tracker::FileReadTracker;
+        use crate::types::resources::State;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.txt");
+        std::fs::write(&path, "hello world\n").unwrap();
+        let canonical = std::fs::canonicalize(&path).unwrap();
+        let tool = SearchReplaceTool;
+        let mut resources = test_resources(tmp.path());
+        resources.register_state::<FileReadTracker>();
+        let mut tracker = FileReadTracker::default();
+        tracker.paths.insert(canonical);
+        resources.insert(State(tracker));
+        let shared = resources.into_shared();
+        let result1 = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(shared.clone()),
+            make_input("test.txt", "hello", "hi"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result1, SearchReplaceOutput::EditsApplied(_)),
+            "first edit after read unexpectedly returned {result1:?}"
+        );
+        let result2 = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(shared),
+            make_input("test.txt", "world", "earth"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result2, SearchReplaceOutput::EditsApplied(_)),
+            "second edit without re-read unexpectedly returned {result2:?}"
+        );
+        let content = std::fs::read_to_string(tmp.path().join("test.txt")).unwrap();
+        assert_eq!(content, "hi earth\n");
+    }
+    #[tokio::test]
+    async fn create_then_edit_succeeds_when_tracker_registered() {
+        use crate::implementations::grok_build::file_read_tracker::FileReadTracker;
+        use crate::types::resources::State;
+        let tmp = TempDir::new().unwrap();
+        let tool = SearchReplaceTool;
+        let mut resources = test_resources(tmp.path());
+        resources.register_state::<FileReadTracker>();
+        resources.insert(State(FileReadTracker::default()));
+        let shared = resources.into_shared();
+        let created = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(shared.clone()),
+            make_input("new.txt", "", "hello world\n"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(created, SearchReplaceOutput::EditsApplied(_)),
+            "create unexpectedly returned {created:?}"
+        );
+        let edited = xai_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(shared),
+            make_input("new.txt", "hello", "hi"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(edited, SearchReplaceOutput::EditsApplied(_)),
+            "edit after create unexpectedly returned {edited:?}"
+        );
+        let content = std::fs::read_to_string(tmp.path().join("new.txt")).unwrap();
+        assert_eq!(content, "hi world\n");
+    }
+    #[tokio::test]
+    async fn unicode_fallback_on_by_default() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "say \u{201C}hello\u{201D} world\n").unwrap();
+        let tool = SearchReplaceTool;
+        let mut resources = test_resources(tmp.path());
+        resources.insert(Params(SearchReplaceParams {
+            skip_read_before_edit: true,
+            ..Default::default()
+        }));
+        let input = make_input("f.txt", "\"hello\"", "\"goodbye\"");
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::EditsApplied(a) => {
+                assert!(a.unicode_normalized, "default should use unicode fallback");
+                let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
+                assert_eq!(content, "say \"goodbye\" world\n");
+            }
+            other => panic!("Expected EditsApplied, got {other:?}"),
+        }
     }
     #[tokio::test]
     async fn skip_read_before_edit_param() {
@@ -1419,7 +1617,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn empty_old_string_overwrites_existing_file_by_default() {
+    async fn empty_old_string_does_not_overwrite_existing_file_by_default() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("existing.txt"), "existing content\n").unwrap();
         let tool = SearchReplaceTool;
@@ -1429,12 +1627,16 @@ mod tests {
             .await
             .unwrap();
         match result {
-            SearchReplaceOutput::EditsApplied(applied) => {
-                assert!(applied.tool_output_for_prompt.contains("has been created"));
+            SearchReplaceOutput::FileAlreadyExists(msg) => {
+                assert!(
+                    msg.contains("old_string"),
+                    "Should mention old_string: {}",
+                    msg
+                );
                 let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
-                assert_eq!(content, "completely new content\n");
+                assert_eq!(content, "existing content\n");
             }
-            other => panic!("Expected EditsApplied, got {:?}", other),
+            other => panic!("Expected FileAlreadyExists, got {:?}", other),
         }
     }
     #[tokio::test]
@@ -2181,7 +2383,9 @@ neutTest_set);
             hint
         );
     }
-    /// Integration: NoMatchesFound message includes confusable hint for smart quotes.
+    /// Integration: with Unicode fallback off, NoMatchesFound includes a
+    /// confusable hint for smart quotes (the default-on fallback applies the
+    /// replacement instead — see `unicode_fallback_on_by_default`).
     #[tokio::test]
     async fn no_matches_includes_confusable_hint_for_smart_quotes() {
         let tmp = TempDir::new().unwrap();
@@ -2192,6 +2396,7 @@ neutTest_set);
         resources.insert(Params(SearchReplaceParams {
             skip_read_before_edit: true,
             empty_old_string_does_not_override: false,
+            unicode_normalized_fallback: false,
             ..Default::default()
         }));
         let input = make_input("doc.md", "\"stream through\"", "replacement");
@@ -2443,9 +2648,9 @@ neutTest_set);
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
     }
-    /// Fallback disabled by default — smart quotes produce NoMatchesFound.
+    /// Fallback can still be disabled — smart quotes produce NoMatchesFound.
     #[tokio::test]
-    async fn fallback_disabled_by_default() {
+    async fn fallback_disabled_when_param_false() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "\u{201C}hello\u{201D}\n").unwrap();
         let tool = SearchReplaceTool;

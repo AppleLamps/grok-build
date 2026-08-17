@@ -67,7 +67,7 @@ pub use code_compaction::{
     assemble_compacted_history, build_summary_prompt, build_summary_prompt_kind,
     classify_http_status, classify_stream_event_error, format_compact_summary,
     format_compact_summary_content, is_context_length_error, is_degenerate_summary,
-    sample_full_replace_summary, wrap_user_query,
+    sample_full_replace_summary, summary_lacks_agency_sections, wrap_user_query,
 };
 pub use item::{
     CompactionFileRef, CompactionItem, CompactionItemBuilder, CompactionItemFactory, CompactionRole,

@@ -50,5 +50,6 @@ pub use prompt::{
 };
 pub use sample::{SampleRetryError, SampledSummary, sample_summary_with_retries};
 pub use summary::{
-    format_compact_summary, format_compact_summary_content, is_degenerate_summary, wrap_user_query,
+    format_compact_summary, format_compact_summary_content, is_degenerate_summary,
+    summary_lacks_agency_sections, wrap_user_query,
 };

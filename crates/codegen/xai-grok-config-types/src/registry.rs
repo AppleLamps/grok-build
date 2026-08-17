@@ -172,7 +172,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "two_pass_compaction",
         path: "features.two_pass_compaction",
         env: "GROK_TWO_PASS_COMPACTION",
-        default_enabled: false,
+        default_enabled: true,
         remote: Some(|settings| settings.two_pass_compaction_enabled),
     },
     FeatureSpec {
