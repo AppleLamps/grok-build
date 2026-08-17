@@ -1676,8 +1676,7 @@ impl Config {
 14→        }
 15→    }
 16→}
-17→
-";
+17→";
         assert_eq!(extracted.content, expected);
         let truncated = effective_limit.map(|l| l < total_lines).unwrap_or(false);
         assert!(
@@ -1735,8 +1734,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
 9→        .map_err(|_| Error::Invalid)?;
 10→    jwt::decode(token)
 11→}
-12→
-";
+12→";
         assert_eq!(extracted.content, expected);
         let truncated = effective_limit.map(|l| l < total_lines).unwrap_or(false);
         assert!(
