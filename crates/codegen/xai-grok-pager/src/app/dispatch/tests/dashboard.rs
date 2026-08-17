@@ -5286,6 +5286,74 @@ fn dashboard_permission_select_happy_path() {
         other => panic!("expected Selected outcome, got {other:?}"),
     }
 }
+
+/// Dashboard peek "enable always-approve" must flip YOLO on the peeked
+/// agent and persist — the same contract as the agent-view permission path.
+/// Selecting it while the dashboard is the active view used to allow only
+/// the current request and leave later prompts asking.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_enable_always_approve_flips_yolo_and_persists() {
+    let mut app = test_app_with_agent();
+    let mut rx = enqueue_permission_with_enable_always_approve(&mut app);
+    assert!(
+        !app.agents[&AgentId(0)].session.is_yolo(),
+        "precondition: YOLO must be off",
+    );
+    open_dashboard(&mut app);
+    assert!(
+        matches!(app.active_view, ActiveView::AgentDashboard),
+        "precondition: dashboard must be the active view",
+    );
+
+    let effects = dispatch_dashboard_permission_select(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
+        1,
+        acp::PermissionOptionId::new(std::sync::Arc::from(
+            xai_grok_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID,
+        )),
+    );
+
+    match rx.try_recv() {
+        Ok(Ok(acp::RequestPermissionResponse {
+            outcome:
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome {
+                    option_id,
+                    ..
+                }),
+            ..
+        })) => {
+            assert_eq!(
+                option_id.0.as_ref(),
+                xai_grok_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID,
+                "the response must echo the picked option_id",
+            );
+        }
+        other => panic!("enable-always-approve must produce a Selected response, got {other:?}"),
+    }
+
+    let persist = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::PersistPermissionMode { canonical, .. } => Some(*canonical),
+            _ => None,
+        })
+        .expect("dashboard enable-always-approve must emit PersistPermissionMode");
+    assert_eq!(persist, "always-approve");
+    assert!(
+        app.agents[&AgentId(0)].session.is_yolo(),
+        "session.yolo_mode must be flipped on from the dashboard peek",
+    );
+    assert!(
+        app.default_yolo,
+        "app.default_yolo must be flipped on (used as initial value for new agents)",
+    );
+    assert!(
+        matches!(app.active_view, ActiveView::AgentDashboard),
+        "active view must remain the dashboard after the YOLO flip",
+    );
+}
 /// Stale request_id — refuses, sets toast, clears peek.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]

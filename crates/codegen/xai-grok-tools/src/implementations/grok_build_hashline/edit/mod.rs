@@ -15,7 +15,8 @@ use super::config::HashlineSchemeParams;
 
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::{
-    Cwd, DisplayCwd, FileSystem, Params, PathNotFoundHints, display_cwd_or_cwd,
+    Cwd, DisplayCwd, FileSystem, GitignoreFilter, Params, PathNotFoundHints, RespectGitignore,
+    display_cwd_or_cwd,
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
@@ -84,6 +85,19 @@ impl HashlineEditTool {
             format_not_found_error(display_path, joined_path, cwd, display_dcwd, hints_enabled)
                 .await;
         crate::types::output::SearchReplaceOutput::FileNotFound(msg)
+    }
+}
+
+/// Rewrite `new_content` to match the original file's line endings.
+///
+/// `apply_edits` splits with `str::lines()` (which strips `\r`) and rejoins
+/// with `\n`, so a successful edit of a CRLF file would otherwise rewrite
+/// the whole file as LF. Mirror `search_replace`'s restore-on-write.
+fn restore_original_line_endings(original: &str, new_content: &str) -> String {
+    if original.contains("\r\n") {
+        new_content.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        new_content.to_owned()
     }
 }
 
@@ -295,7 +309,7 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
             ));
         }
 
-        let (cwd, display_cwd, fs, scheme, hints_enabled) = {
+        let (cwd, display_cwd, fs, scheme, hints_enabled, respect_gitignore, gitignore_filter) = {
             let res = resources.lock().await;
             let cwd = match ctx.extensions.get::<xai_tool_runtime::Cwd>() {
                 Some(dir) => dir.0.clone(),
@@ -312,13 +326,41 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                 .build_scheme()
                 .map_err(xai_tool_runtime::ToolError::invalid_arguments)?;
             let hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
-            (cwd, display_cwd, fs, scheme, hints_enabled)
+            // Match `search_replace`: missing RespectGitignore defaults to on.
+            let respect_gitignore = res.get::<RespectGitignore>().is_none_or(|r| r.0);
+            let gitignore_filter = res.get::<GitignoreFilter>().cloned();
+            (
+                cwd,
+                display_cwd,
+                fs,
+                scheme,
+                hints_enabled,
+                respect_gitignore,
+                gitignore_filter,
+            )
         };
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
         let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        let canonical = crate::util::fs::try_canonicalize(&joined_path).await;
+        let gitignore_check_path = canonical
+            .as_ref()
+            .ok()
+            .cloned()
+            .unwrap_or_else(|| joined_path.clone());
+        if respect_gitignore
+            && let Some(filter) = gitignore_filter.as_ref()
+            && filter.is_ignored(&gitignore_check_path)
+        {
+            return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(
+                format!(
+                    "Error: {} is ignored by .gitignore and cannot be edited.",
+                    input.file_path
+                ),
+            ));
+        }
         // Error-preserving variant: the Err arm drives new-file creation.
-        let path = match crate::util::fs::try_canonicalize(&joined_path).await {
+        let path = match canonical {
             Ok(p) => p,
             Err(_) => {
                 // Try unicode-confusable resolution before giving up.
@@ -331,7 +373,20 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                     if input.edits.len() == 1
                         && let HashlineOp::Write { ref content } = input.edits[0]
                     {
-                        if let Err(e) = fs.write_file(&joined_path, content.as_bytes()).await {
+                        // Validate before creating the file so a rejected
+                        // payload (e.g. leftover hashline_read prefixes)
+                        // cannot leave a polluted new file on disk.
+                        let r = apply::apply_edits(content, &input.edits, &joined_path, &*scheme);
+                        let Some(new_content) = r.new_content.as_deref() else {
+                            return Ok(to_search_replace(
+                                r.output,
+                                &joined_path,
+                                "",
+                                None,
+                                r.edit_details,
+                            ));
+                        };
+                        if let Err(e) = fs.write_file(&joined_path, new_content.as_bytes()).await {
                             let display_path = display_dcwd.join(&input.file_path);
                             return Ok(match e.io_error_kind() {
                                 Some(std::io::ErrorKind::NotFound) => {
@@ -350,14 +405,12 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                             });
                         }
                         let abs = crate::util::fs::canonicalize_with_timeout(joined_path).await;
-                        let r = apply::apply_edits(content, &input.edits, &abs, &*scheme);
-                        let edit_details = r.edit_details;
                         return Ok(to_search_replace(
                             r.output,
                             &abs,
                             "",
                             r.new_content.as_deref(),
-                            edit_details,
+                            r.edit_details,
                         ));
                     }
 
@@ -401,7 +454,12 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
         let apply_result = apply::apply_edits(&old_content, &input.edits, &path, &*scheme);
 
         if let Some(ref new_content) = apply_result.new_content
-            && let Err(e) = fs.write_file(&path, new_content.as_bytes()).await
+            && let Err(e) = fs
+                .write_file(
+                    &path,
+                    restore_original_line_endings(&old_content, new_content).as_bytes(),
+                )
+                .await
         {
             let err_output = HashlineEditOutput::Error(types::HashlineEditError {
                 error: types::HashlineEditErrorKind::IoError,
@@ -443,7 +501,8 @@ mod tests {
     use crate::notification::types::ToolNotificationHandle;
     use crate::types::output::SearchReplaceOutput;
     use crate::types::resources::{
-        Cwd, FileSystem, NotificationHandle, PathNotFoundHints, Resources,
+        Cwd, FileSystem, GitignoreFilter, NotificationHandle, PathNotFoundHints, Resources,
+        RespectGitignore,
     };
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1143,5 +1202,122 @@ mod tests {
             "context_before: {}",
             d.context_before
         );
+    }
+
+    #[tokio::test]
+    async fn write_rejected_payload_does_not_create_file() {
+        let tmp = TempDir::new().unwrap();
+        let tool = HashlineEditTool;
+        let resources = test_resources(tmp.path());
+        let target = tmp.path().join("new.txt");
+        let input = HashlineEditInput {
+            file_path: "new.txt".to_string(),
+            edits: vec![HashlineOp::Write {
+                content: "normal line\n22:abc:rst\u{2192}let x = 1;\n".to_owned(),
+            }],
+        };
+
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("anchor prefixes"),
+                    "expected anchor-prefix rejection, got: {msg}"
+                );
+            }
+            other => panic!("Expected InvalidInput, got {other:?}"),
+        }
+        assert!(
+            !target.exists(),
+            "rejected Write must not create the target file"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_crlf_file_keeps_crlf_after_replace() {
+        let tmp = TempDir::new().unwrap();
+        let original = "line1\r\nline2\r\nline3\r\n";
+        std::fs::write(tmp.path().join("test.txt"), original).unwrap();
+        let anchors = anchors_for(original);
+
+        let tool = HashlineEditTool;
+        let resources = test_resources(tmp.path());
+        let input = HashlineEditInput {
+            file_path: "test.txt".to_string(),
+            edits: vec![HashlineOp::Replace {
+                anchor: anchors[1].clone(),
+                end_anchor: None,
+                content: "changed".to_owned(),
+            }],
+        };
+
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, SearchReplaceOutput::EditsApplied(_)),
+            "expected success, got {result:?}"
+        );
+
+        let on_disk = std::fs::read_to_string(tmp.path().join("test.txt")).unwrap();
+        assert!(
+            on_disk.contains("\r\n"),
+            "CRLF file must keep CRLF endings after edit.\nActual: {on_disk:?}"
+        );
+        assert!(
+            !on_disk.replace("\r\n", "").contains('\n'),
+            "edit must not introduce bare LF into a CRLF file.\nActual: {on_disk:?}"
+        );
+        assert!(
+            on_disk.contains("changed"),
+            "replacement content missing.\nActual: {on_disk:?}"
+        );
+    }
+
+    fn build_gitignore(root: &std::path::Path, patterns: &[&str]) -> ignore::gitignore::Gitignore {
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+        for pattern in patterns {
+            builder.add_line(None, pattern).unwrap();
+        }
+        builder.build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn edit_blocked_by_gitignore() {
+        let tmp = TempDir::new().unwrap();
+        let canonical_root = dunce::canonicalize(tmp.path()).unwrap();
+        let build_dir = canonical_root.join("build");
+        std::fs::create_dir(&build_dir).unwrap();
+        std::fs::write(build_dir.join("output.js"), "var x = 1;\n").unwrap();
+
+        let tool = HashlineEditTool;
+        let mut resources = test_resources(tmp.path());
+        let gi = build_gitignore(&canonical_root, &["build/", "*.min.js"]);
+        resources.insert(GitignoreFilter::new(gi, canonical_root));
+        resources.insert(RespectGitignore(true));
+
+        let input = HashlineEditInput {
+            file_path: "build/output.js".to_string(),
+            edits: vec![HashlineOp::Write {
+                content: "var x = 2;\n".to_owned(),
+            }],
+        };
+        let result = xai_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("ignored by .gitignore"),
+                    "Error should mention .gitignore: {msg}"
+                );
+            }
+            other => panic!("Expected InvalidInput for gitignored file, got {other:?}"),
+        }
+        let on_disk = std::fs::read_to_string(build_dir.join("output.js")).unwrap();
+        assert_eq!(on_disk, "var x = 1;\n", "gitignored file must be unchanged");
     }
 }
