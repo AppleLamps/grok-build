@@ -2383,7 +2383,9 @@ neutTest_set);
             hint
         );
     }
-    /// Integration: NoMatchesFound message includes confusable hint for smart quotes.
+    /// Integration: with Unicode fallback off, NoMatchesFound includes a
+    /// confusable hint for smart quotes (the default-on fallback applies the
+    /// replacement instead — see `unicode_fallback_on_by_default`).
     #[tokio::test]
     async fn no_matches_includes_confusable_hint_for_smart_quotes() {
         let tmp = TempDir::new().unwrap();
@@ -2394,6 +2396,7 @@ neutTest_set);
         resources.insert(Params(SearchReplaceParams {
             skip_read_before_edit: true,
             empty_old_string_does_not_override: false,
+            unicode_normalized_fallback: false,
             ..Default::default()
         }));
         let input = make_input("doc.md", "\"stream through\"", "replacement");
