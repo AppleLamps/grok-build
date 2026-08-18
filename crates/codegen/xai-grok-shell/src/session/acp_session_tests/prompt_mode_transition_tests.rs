@@ -82,7 +82,8 @@ fn cursor_filter_hides_hashline_and_cursor_edit_aliases() {
         fn_def("EditFile"),
         fn_def("CreatePlan"),
     ];
-    let kept = names(&filter_cursor_tools_by_plan_mode(defs, true));
+    let filtered = filter_cursor_tools_by_plan_mode(defs, true);
+    let kept = names(&filtered);
     assert!(kept.contains(&"Read"));
     assert!(kept.contains(&"CreatePlan"));
     assert!(!kept.contains(&"hashline_edit"));
@@ -94,9 +95,10 @@ fn cursor_filter_hides_hashline_and_cursor_edit_aliases() {
 fn cursor_filter_hides_registered_edit_kind_even_when_name_is_unknown() {
     use xai_grok_tools::types::tool::ToolKind;
     let defs = vec![fn_def("custom_file_mutator"), fn_def("Read")];
-    let kept = names(&filter_write_edit_tools(defs, true, |name| {
+    let filtered = filter_write_edit_tools(defs, true, |name| {
         (name == "custom_file_mutator").then_some(ToolKind::Edit)
-    }));
+    });
+    let kept = names(&filtered);
     assert!(kept.contains(&"Read"));
     assert!(!kept.contains(&"custom_file_mutator"));
 }
