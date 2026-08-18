@@ -2548,3 +2548,13 @@ async fn workflow_spawns_bypass_the_session_concurrent_limit() {
     );
     harness.actor.abort();
 }
+
+#[test]
+fn cap_completion_output_omits_incomplete_follow_up() {
+    let out = super::super::cap_completion_output(&std::sync::Arc::from("abcdef"), 2);
+    assert!(out.contains("[truncated:"), "{out}");
+    assert!(
+        !out.contains("Recover with"),
+        "wrapper has no task id; do not advertise a bare get_task_output, got {out}"
+    );
+}

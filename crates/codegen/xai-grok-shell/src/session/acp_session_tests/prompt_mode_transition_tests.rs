@@ -73,6 +73,34 @@ fn cursor_filter_in_plan_mode_hides_writes_and_keeps_create_plan() {
     assert!(!kept.contains(&"StrReplace"));
 }
 #[test]
+fn cursor_filter_hides_hashline_and_cursor_edit_aliases() {
+    let defs = vec![
+        fn_def("Read"),
+        fn_def("hashline_edit"),
+        fn_def("NotebookEdit"),
+        fn_def("MultiEdit"),
+        fn_def("EditFile"),
+        fn_def("CreatePlan"),
+    ];
+    let kept = names(&filter_cursor_tools_by_plan_mode(defs, true));
+    assert!(kept.contains(&"Read"));
+    assert!(kept.contains(&"CreatePlan"));
+    assert!(!kept.contains(&"hashline_edit"));
+    assert!(!kept.contains(&"NotebookEdit"));
+    assert!(!kept.contains(&"MultiEdit"));
+    assert!(!kept.contains(&"EditFile"));
+}
+#[test]
+fn cursor_filter_hides_registered_edit_kind_even_when_name_is_unknown() {
+    use xai_grok_tools::types::tool::ToolKind;
+    let defs = vec![fn_def("custom_file_mutator"), fn_def("Read")];
+    let kept = names(&filter_write_edit_tools(defs, true, |name| {
+        (name == "custom_file_mutator").then_some(ToolKind::Edit)
+    }));
+    assert!(kept.contains(&"Read"));
+    assert!(!kept.contains(&"custom_file_mutator"));
+}
+#[test]
 fn cursor_filter_hides_grok_write_tools_in_plan_mode() {
     let defs = vec![
         fn_def("read_file"),
@@ -323,6 +351,31 @@ async fn leaving_plan_mode_restores_search_replace_and_home_completion() {
                 Some("complete_task"),
             );
             assert_eq!(*actor.current_prompt_mode.lock(), PromptMode::Agent);
+        })
+        .await;
+}
+
+/// A named-agent switch must cache the rendered prompt on the live Agent,
+/// not only in conversation — a later model switch reads `system_prompt()`.
+#[tokio::test]
+async fn named_agent_switch_caches_rendered_system_prompt() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _event_rx) = actor_with_events().await;
+            let before = actor.agent.borrow().system_prompt().to_string();
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
+            let after = actor.agent.borrow().system_prompt().to_string();
+            assert_ne!(
+                before, after,
+                "cached system_prompt must change on named-agent switch"
+            );
+            assert!(
+                after.to_lowercase().contains("brows"),
+                "cached prompt must be the browser_use agent, got {after:?}"
+            );
         })
         .await;
 }

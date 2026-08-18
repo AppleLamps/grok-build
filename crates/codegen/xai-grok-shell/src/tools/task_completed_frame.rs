@@ -121,30 +121,50 @@ fn fit_output(output: &str, output_file: &std::path::Path, room: usize) -> (Stri
     }
     let path = output_file.display().to_string();
     let follow_up = format!("read_file {path}");
-    let footer = format!(
-        "\n\n{}",
-        xai_grok_tools::util::truncate::recoverable_truncation_footer(
-            0,
-            output.len(),
-            Some(path.as_str()),
-            &follow_up,
+    let truncation_footer = |kept: usize| {
+        format!(
+            "\n\n{}",
+            xai_grok_tools::util::truncate::recoverable_truncation_footer(
+                kept,
+                output.len(),
+                Some(path.as_str()),
+                &follow_up,
+            )
         )
-    );
+    };
+    // Reserve using a footer whose kept-count is `output.len()` (an upper
+    // bound). `0 B` is shorter than `31.5 KB`, so sizing against zero then
+    // substituting the real count overflowed the budget and dropped the
+    // prefix. After that, shrink if a unit-boundary format (`1023 B` vs
+    // `1.0 KB`) still overruns.
+    let mut footer = truncation_footer(output.len());
     let footer_room = encoded_len(&footer);
     if footer_room > room {
         return (String::new(), true);
     }
-    let kept = prefix_within_encoded_len(output, room - footer_room);
-    let footer = format!(
-        "\n\n{}",
-        xai_grok_tools::util::truncate::recoverable_truncation_footer(
-            kept.len(),
-            output.len(),
-            Some(path.as_str()),
-            &follow_up,
-        )
-    );
-    (format!("{kept}{footer}"), true)
+    let mut kept = prefix_within_encoded_len(output, room - footer_room).to_string();
+    loop {
+        footer = truncation_footer(kept.len());
+        let combined = format!("{kept}{footer}");
+        let used = encoded_len(&combined);
+        if used <= room {
+            return (combined, true);
+        }
+        let overflow = used - room;
+        let next_max = encoded_len(&kept).saturating_sub(overflow.max(1));
+        if next_max == 0 {
+            footer = truncation_footer(0);
+            if encoded_len(&footer) <= room {
+                return (footer, true);
+            }
+            return (String::new(), true);
+        }
+        let next = prefix_within_encoded_len(&kept, next_max);
+        if next.len() >= kept.len() {
+            return (String::new(), true);
+        }
+        kept = next.to_string();
+    }
 }
 
 /// Keep in step with [`COMPACTED_FIELDS`], the replay path's copy of this

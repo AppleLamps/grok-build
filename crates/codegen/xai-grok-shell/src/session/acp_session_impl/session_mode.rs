@@ -22,16 +22,32 @@ pub(super) fn session_mode_id_from_prompt_mode(prompt_mode: PromptMode) -> acp::
     acp::SessionModeId::new(mode.as_id())
 }
 /// Write/edit tools hidden while plan or ask mode is in effect.
-/// Names cover GrokBuild, GrokBuildConcise, Cursor-style, and Codex.
+/// Names cover GrokBuild, GrokBuildConcise, hashline, Cursor-style, and Codex.
+/// Kind lookup is preferred; this list is the fallback when a definition has
+/// no registered kind (unit tests, aliased Cursor names).
 const WRITE_EDIT_TOOL_NAMES: &[&str] = &[
     "search_replace",
     "write",
     "Write",
     "StrReplace",
     "EditNotebook",
+    "NotebookEdit",
     "apply_patch",
     "Edit",
+    "MultiEdit",
+    "hashline_edit",
+    "EditFile",
 ];
+
+fn is_write_or_edit_tool(name: &str, kind: Option<xai_grok_tools::types::tool::ToolKind>) -> bool {
+    use xai_grok_tools::types::tool::ToolKind;
+    matches!(
+        kind,
+        Some(ToolKind::Edit | ToolKind::Write | ToolKind::Delete | ToolKind::Move)
+    ) || WRITE_EDIT_TOOL_NAMES
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n))
+}
 
 /// Hide write/edit tools when the session is read-only (plan/ask).
 /// `create_plan` / read / ask-user tools stay advertised.
@@ -39,15 +55,22 @@ pub(super) fn filter_cursor_tools_by_plan_mode(
     defs: Vec<ToolDefinition>,
     hide_writes: bool,
 ) -> Vec<ToolDefinition> {
+    filter_write_edit_tools(defs, hide_writes, |_| None)
+}
+
+/// Like [`filter_cursor_tools_by_plan_mode`], using each tool's registered
+/// [`ToolKind`] when the caller can look it up (hides `hashline_edit` even
+/// if a future alias is missing from the name list).
+pub(super) fn filter_write_edit_tools(
+    defs: Vec<ToolDefinition>,
+    hide_writes: bool,
+    kind_of: impl Fn(&str) -> Option<xai_grok_tools::types::tool::ToolKind>,
+) -> Vec<ToolDefinition> {
     if !hide_writes {
         return defs;
     }
     defs.into_iter()
-        .filter(|d| {
-            !WRITE_EDIT_TOOL_NAMES
-                .iter()
-                .any(|n| d.function.name.eq_ignore_ascii_case(n))
-        })
+        .filter(|d| !is_write_or_edit_tool(&d.function.name, kind_of(&d.function.name)))
         .collect()
 }
 impl SessionActor {
@@ -171,8 +194,12 @@ impl SessionActor {
                 .apply_session_mode_overlay(prompt_mode == PromptMode::Agent);
         }
         self.emit_resolved_tool_overrides();
-        if let Some(ref def) = agent_def {
-            let new_prompt = self.agent.borrow().render_prompt_for_definition(def).await;
+        if agent_def.is_some() {
+            // Cache the rendered prompt on the live Agent so a later model
+            // switch that reads `system_prompt()` cannot restore the previous
+            // agent's prompt while the new policies stay in effect.
+            self.agent.borrow_mut().finalize_prompt().await;
+            let new_prompt = self.agent.borrow().system_prompt().to_string();
             let mut conversation = self.chat_state_handle.get_conversation().await;
             for item in conversation.iter_mut() {
                 if let ConversationItem::System(sys) = item {
@@ -469,8 +496,6 @@ fn write_availability_reminder(mode: PromptMode) -> &'static str {
             "Write and edit tools are hidden. You may only update the plan file; \
              other workspace edits are blocked."
         }
-        PromptMode::Ask => {
-            "This mode is read-only. Write and edit tools are hidden."
-        }
+        PromptMode::Ask => "This mode is read-only. Write and edit tools are hidden.",
     }
 }

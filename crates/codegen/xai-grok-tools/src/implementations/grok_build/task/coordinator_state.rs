@@ -768,7 +768,7 @@ pub(super) fn completed_inspection(
 /// Truncate `output` to `cap` bytes (UTF-8 safe) with a truncation footer.
 /// Returns a refcount clone when already within the cap.
 pub fn cap_completion_output(output: &Arc<str>, cap: usize) -> Arc<str> {
-    cap_completion_output_with_recovery(output, cap, None, "get_task_output")
+    cap_completion_output_with_recovery(output, cap, None, "")
 }
 
 /// Like [`cap_completion_output`], with an explicit log path and follow-up

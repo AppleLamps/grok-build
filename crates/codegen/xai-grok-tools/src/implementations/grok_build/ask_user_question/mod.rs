@@ -331,8 +331,7 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
             None => {
                 return Err(xai_tool_runtime::ToolError::custom(
                     "missing_resource",
-                    "UserQuestionSender is not available; questions were not shown to the user"
-                        .to_string(),
+                    "UserQuestionSender".to_string(),
                 ));
             }
         };
