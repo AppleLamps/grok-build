@@ -52,7 +52,7 @@ fn names(defs: &[ToolDefinition]) -> Vec<&str> {
     defs.iter().map(|d| d.function.name.as_str()).collect()
 }
 #[test]
-fn cursor_filter_in_plan_mode_keeps_writes_and_shows_create_plan() {
+fn cursor_filter_in_plan_mode_hides_writes_and_keeps_create_plan() {
     let defs = vec![
         fn_def("Read"),
         fn_def("Grep"),
@@ -69,11 +69,11 @@ fn cursor_filter_in_plan_mode_keeps_writes_and_shows_create_plan() {
     assert!(kept.contains(&"CreatePlan"));
     assert!(kept.contains(&"SwitchMode"));
     assert!(kept.contains(&"AskQuestion"));
-    assert!(kept.contains(&"Write"));
-    assert!(kept.contains(&"StrReplace"));
+    assert!(!kept.contains(&"Write"));
+    assert!(!kept.contains(&"StrReplace"));
 }
 #[test]
-fn cursor_filter_is_noop_for_non_cursor_tools() {
+fn cursor_filter_hides_grok_write_tools_in_plan_mode() {
     let defs = vec![
         fn_def("read_file"),
         fn_def("search_replace"),
@@ -84,7 +84,11 @@ fn cursor_filter_is_noop_for_non_cursor_tools() {
     ];
     let in_plan = filter_cursor_tools_by_plan_mode(defs.clone(), true);
     let out_of_plan = filter_cursor_tools_by_plan_mode(defs.clone(), false);
-    assert_eq!(names(&in_plan).len(), defs.len());
+    let in_names = names(&in_plan);
+    assert!(in_names.contains(&"read_file"));
+    assert!(in_names.contains(&"ask_user_question"));
+    assert!(!in_names.contains(&"search_replace"));
+    assert!(!in_names.contains(&"write"));
     assert_eq!(names(&out_of_plan).len(), defs.len());
 }
 /// Pins the `reconcile_plan_mode_with_prompt` transitions:
@@ -244,6 +248,70 @@ async fn a_user_turn_still_applies_its_declared_mode() {
             assert_eq!(resolved, PromptMode::Plan);
             assert_eq!(actor.plan_mode.lock().state(), PlanModeState::Pending);
             assert_eq!(mode_updates(&mut event_rx), vec!["plan".to_string()]);
+        })
+        .await;
+}
+
+/// Open in plan, switch to agent: write tools come back and the home
+/// completion requirement is restored (not a stale plan-mode gate).
+#[tokio::test]
+async fn leaving_plan_mode_restores_search_replace_and_home_completion() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _event_rx) = actor_with_events().await;
+            let mut home = actor.agent.borrow().definition().clone();
+            home.completion_requirement = Some(xai_grok_agent::config::CompletionRequirement {
+                tool: "complete_task".into(),
+                reminder: "Call complete_task.".into(),
+                recovery: None,
+            });
+            actor.agent.borrow_mut().update_policies_from_definition(&home);
+
+            actor
+                .handle_session_mode(acp::SessionModeId::new("plan"))
+                .await;
+            let plan_names: Vec<String> = actor
+                .prepare_tool_definitions_inner()
+                .await
+                .into_iter()
+                .map(|d| d.function.name)
+                .collect();
+            assert!(
+                !plan_names.iter().any(|n| n == "search_replace"),
+                "search_replace must be hidden in plan mode, got {plan_names:?}"
+            );
+            assert!(
+                actor
+                    .agent
+                    .borrow()
+                    .completion_requirement()
+                    .is_none(),
+                "plan overlay must drop the home completion gate"
+            );
+
+            actor
+                .handle_session_mode(acp::SessionModeId::new("default"))
+                .await;
+            let agent_names: Vec<String> = actor
+                .prepare_tool_definitions_inner()
+                .await
+                .into_iter()
+                .map(|d| d.function.name)
+                .collect();
+            assert!(
+                agent_names.iter().any(|n| n == "search_replace"),
+                "search_replace must be callable after switching to agent, got {agent_names:?}"
+            );
+            assert_eq!(
+                actor
+                    .agent
+                    .borrow()
+                    .completion_requirement()
+                    .map(|c| c.tool.as_str()),
+                Some("complete_task"),
+            );
+            assert_eq!(*actor.current_prompt_mode.lock(), PromptMode::Agent);
         })
         .await;
 }

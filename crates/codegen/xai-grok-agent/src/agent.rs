@@ -18,13 +18,19 @@ use crate::system_reminder::ReminderPolicy;
 ///
 /// Created by AgentBuilder from an AgentDefinition + session context.
 ///
-/// The Agent is effectively immutable after construction. It holds
-/// Arc<ToolBridge> — mutations to tool state (MCP registration,
-/// completion tracking, retry config) go through ToolBridge's
-/// internal locks.
+/// The Agent is session-bound after construction. Chat state lives on
+/// the host; this type holds `Arc<ToolBridge>` and a definition that
+/// mid-session mode switches may overlay without rebuilding the
+/// registry. Mutations to tool state (MCP registration, completion
+/// tracking) go through ToolBridge's internal locks.
 pub struct Agent {
-    /// The definition this agent was built from.
+    /// The definition currently in effect (may be a session-mode overlay).
     definition: AgentDefinition,
+
+    /// Definition the session was built from (or last named-agent switch).
+    /// Plan/ask/agent overlays restore from this so a mode toggle cannot
+    /// drop the home completion requirement or permission mode.
+    base_definition: AgentDefinition,
 
     /// The context that produced the current system prompt.
     /// Stored for inspection, re-rendering, and serialization.
@@ -66,6 +72,7 @@ impl Agent {
         backend_search_enabled: bool,
     ) -> Self {
         Self {
+            base_definition: definition.clone(),
             definition,
             prompt_context,
             system_prompt,
@@ -89,9 +96,15 @@ impl Agent {
         &self.definition.description
     }
 
-    /// The full agent definition.
+    /// The full agent definition currently in effect.
     pub fn definition(&self) -> &AgentDefinition {
         &self.definition
+    }
+
+    /// Home definition this session was built from (or last named-agent
+    /// switch). Session-mode overlays restore from this.
+    pub fn base_definition(&self) -> &AgentDefinition {
+        &self.base_definition
     }
 
     /// Permission mode for this agent.
@@ -209,14 +222,41 @@ impl Agent {
         )
     }
 
-    /// Update completion and retry policies from a new definition.
+    /// Apply a named-agent definition's runtime policies and make it the
+    /// new home. Does **not** rebuild the tool registry or re-render
+    /// prompts — the host re-renders the system message separately.
     ///
-    /// Does NOT rebuild the tool registry or re-render prompts.
-    /// Used for mid-session mode switching.
-    pub async fn update_policies_from_definition(&self, _def: &AgentDefinition) {
-        // TODO: completion requirements and retry configs are now part of
-        // ToolServerConfig and handled at registry finalization time.
-        // Mid-session policy updates are not yet supported in the new architecture.
+    /// Used for mid-session switches to a different agent (e.g.
+    /// `browser_use`). Plan/ask/agent session-mode toggles should call
+    /// [`Self::apply_session_mode_overlay`] so the original home is
+    /// restored when leaving the overlay.
+    pub fn update_policies_from_definition(&mut self, def: &AgentDefinition) {
+        apply_runtime_policies(&mut self.definition, def);
+        self.sync_prompt_context_from_definition(def);
+        self.base_definition = def.clone();
+    }
+
+    /// Overlay plan/ask (read-only, no completion gate) or restore the
+    /// home definition for agent mode. Chat state and the tool registry
+    /// stay put.
+    pub fn apply_session_mode_overlay(&mut self, restore_home: bool) {
+        let overlay = if restore_home {
+            self.base_definition.clone()
+        } else {
+            readonly_mode_overlay(&self.base_definition)
+        };
+        apply_runtime_policies(&mut self.definition, &overlay);
+        self.sync_prompt_context_from_definition(&overlay);
+    }
+
+    fn sync_prompt_context_from_definition(&mut self, def: &AgentDefinition) {
+        self.prompt_context.prompt_mode = def.prompt_mode.clone();
+        self.prompt_context.prompt_body = def.prompt_body.clone();
+        self.prompt_context.system_prompt = def.system_prompt.clone();
+        self.prompt_context.include_browser_verification = def.include_browser_verification();
+        if !def.agents_md {
+            self.prompt_context.agents_md_files.clear();
+        }
     }
 
     /// Re-render the system prompt from current ToolBridge state
@@ -249,6 +289,31 @@ impl Agent {
 
         ctx.render(&self.tool_bridge).await.unwrap_or_default()
     }
+}
+
+/// Copy the fields a mid-session switch is allowed to change without
+/// rebuilding the registry. Chat identity (MCP servers, session tool
+/// clamps, allowed subagent types) stays on `dst`.
+pub(crate) fn apply_runtime_policies(dst: &mut AgentDefinition, src: &AgentDefinition) {
+    dst.completion_requirement = src.completion_requirement.clone();
+    dst.permission_mode = src.permission_mode.clone();
+    dst.prompt_mode = src.prompt_mode.clone();
+    dst.tool_overrides = src.tool_overrides.clone();
+    dst.prompt_body = src.prompt_body.clone();
+    dst.system_prompt = src.system_prompt.clone();
+    dst.agents_md = src.agents_md;
+    dst.name = src.name.clone();
+    dst.description = src.description.clone();
+}
+
+/// Plan/ask overlay: read-only permission and no completion gate, cloned
+/// from the session's home definition so leaving the overlay can restore
+/// the original requirement.
+pub(crate) fn readonly_mode_overlay(home: &AgentDefinition) -> AgentDefinition {
+    let mut overlay = home.clone();
+    overlay.permission_mode = PermissionMode::Plan;
+    overlay.completion_requirement = None;
+    overlay
 }
 
 #[cfg(test)]
@@ -291,5 +356,63 @@ mod tests {
         // 100% threshold → only triggers when fully used
         assert!(!should_auto_compact_check(99_999, 100_000, 100));
         assert!(should_auto_compact_check(100_000, 100_000, 100));
+    }
+
+    #[test]
+    fn apply_runtime_policies_copies_completion_and_permission() {
+        use super::{apply_runtime_policies, readonly_mode_overlay};
+        use crate::config::{AgentDefinition, CompletionRequirement, PermissionMode};
+
+        let mut home = AgentDefinition::default_grok_build();
+        home.completion_requirement = Some(CompletionRequirement {
+            tool: "complete_task".into(),
+            reminder: "Call complete_task before ending.".into(),
+            recovery: None,
+        });
+        home.permission_mode = PermissionMode::BypassPermissions;
+
+        let overlay = readonly_mode_overlay(&home);
+        assert_eq!(overlay.permission_mode, PermissionMode::Plan);
+        assert!(overlay.completion_requirement.is_none());
+        assert_eq!(overlay.name, home.name);
+
+        let mut live = home.clone();
+        apply_runtime_policies(&mut live, &overlay);
+        assert!(live.completion_requirement.is_none());
+        assert_eq!(live.permission_mode, PermissionMode::Plan);
+
+        apply_runtime_policies(&mut live, &home);
+        assert_eq!(
+            live.completion_requirement.as_ref().map(|c| c.tool.as_str()),
+            Some("complete_task")
+        );
+        assert_eq!(live.permission_mode, PermissionMode::BypassPermissions);
+    }
+
+    #[test]
+    fn named_agent_switch_replaces_completion_requirement() {
+        use super::apply_runtime_policies;
+        use crate::config::{AgentDefinition, CompletionRequirement, PermissionMode};
+
+        let mut src = AgentDefinition::browser_use();
+        src.completion_requirement = Some(CompletionRequirement {
+            tool: "browser_done".into(),
+            reminder: "Mark the browse complete.".into(),
+            recovery: None,
+        });
+        let mut dst = AgentDefinition::default_grok_build();
+        dst.completion_requirement = Some(CompletionRequirement {
+            tool: "complete_task".into(),
+            reminder: "stale".into(),
+            recovery: None,
+        });
+        apply_runtime_policies(&mut dst, &src);
+        assert_eq!(
+            dst.completion_requirement.as_ref().map(|c| c.tool.as_str()),
+            Some("browser_done")
+        );
+        assert_eq!(dst.name, src.name);
+        assert_eq!(dst.permission_mode, src.permission_mode);
+        assert_ne!(dst.permission_mode, PermissionMode::Plan);
     }
 }

@@ -214,8 +214,9 @@ impl SessionActor {
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let defs = bridge.tool_definitions_builtins_only().await;
-        let plan_active = self.plan_mode.lock().is_active();
-        filter_cursor_tools_by_plan_mode(defs, plan_active)
+        let hide_writes = self.current_prompt_mode.lock().is_read_only()
+            || self.plan_mode.lock().is_active();
+        filter_cursor_tools_by_plan_mode(defs, hide_writes)
     }
     pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {
         self.model_auth_state(model_id).0

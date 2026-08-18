@@ -28,7 +28,6 @@ use crate::types::output::{MCPOutputDetails, ToolOutput};
 use crate::types::tool::ToolKind;
 use crate::util::base64_images::{ExtractionResult, extract_base64_images};
 use crate::util::query_tools::{QueryTools, examples_clause};
-use crate::util::truncate::format_bytes;
 
 /// Default inline limit for MCP tool output in chat state (bytes, not tokens).
 pub const MCP_MAX_OUTPUT_BYTES: usize = 20_000;
@@ -236,19 +235,33 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
 
     let truncated =
         crate::util::truncate::truncate_str(text.as_str(), trunc_ctx.max_output_bytes).to_owned();
-    let steer = if file_hint.is_empty() {
-        String::new()
+    let wrote = !file_hint.is_empty();
+    let follow_up = if wrote {
+        if let Some(ref path) = output_file_path {
+            let path = path.to_string_lossy();
+            let steer = kind.steer(&trunc_ctx.shell_tool, QueryTools::detect());
+            if steer.is_empty() {
+                format!("read_file {path}")
+            } else {
+                steer.trim().to_string()
+            }
+        } else {
+            String::new()
+        }
     } else {
-        kind.steer(&trunc_ctx.shell_tool, QueryTools::detect())
+        String::new()
     };
-    *text = format!(
-        "{}\n\n[MCP output truncated: showing first {} of {}.{}{}]",
-        truncated,
-        format_bytes(trunc_ctx.max_output_bytes as u64),
-        format_bytes(total_bytes as u64),
-        file_hint,
-        steer,
+    let log_path = output_file_path
+        .as_ref()
+        .filter(|_| wrote)
+        .map(|p| p.to_string_lossy().into_owned());
+    let footer = crate::util::truncate::recoverable_truncation_footer(
+        trunc_ctx.max_output_bytes,
+        total_bytes,
+        log_path.as_deref(),
+        &follow_up,
     );
+    *text = format!("{truncated}\n\n{footer}");
 }
 
 /// Bound the `MCP`/`Text` variants to the inline size limit, keeping a preview
@@ -397,8 +410,8 @@ mod tests {
         };
         assert!(t.text.len() < full.len());
         assert!(t.text.starts_with(&"x".repeat(100)), "preview prefix kept");
-        assert!(t.text.contains("[MCP output truncated:"));
-        assert!(t.text.contains("Full output written to:"));
+        assert!(t.text.contains("[truncated:"));
+        assert!(t.text.contains("full output at:"));
 
         let dump = dir.path().join("mcp").join("call-test.txt");
         assert_eq!(tokio::fs::read_to_string(&dump).await.unwrap(), full);
@@ -424,7 +437,7 @@ mod tests {
             panic!("expected Text")
         };
         assert!(
-            t.text.contains("[MCP output truncated:"),
+            t.text.contains("[truncated:"),
             "one over truncates"
         );
     }
@@ -528,14 +541,14 @@ mod tests {
         );
         // Truncation footer is appended after the bound, so allow overhead.
         let body_end = text
-            .find("\n\n[MCP output truncated:")
+            .find("\n\n[truncated:")
             .unwrap_or(text.len());
         assert!(
             body_end <= max,
             "inline body must stay within cap: body={body_end} max={max}"
         );
         assert!(
-            text.contains("[MCP output truncated:"),
+            text.contains("[truncated:"),
             "large leftover prose still triggers truncate"
         );
 
@@ -592,7 +605,7 @@ mod tests {
             panic!("expected OkayOutput");
         };
         assert_eq!(text, IMAGE_CONTENT_PLACEHOLDER);
-        assert!(!text.contains("[MCP output truncated:"));
+        assert!(!text.contains("[truncated:"));
     }
 
     #[tokio::test]
@@ -633,7 +646,7 @@ mod tests {
         assert!(!text.contains("data:image"));
         assert!(!text.contains(&p1));
         assert!(!text.contains(&p2));
-        assert!(text.contains("[MCP output truncated:"));
+        assert!(text.contains("[truncated:"));
 
         let dump = tokio::fs::read_to_string(dir.path().join("mcp").join("call-test.txt"))
             .await
@@ -677,6 +690,6 @@ mod tests {
         assert!(text.contains(IMAGE_CONTENT_PLACEHOLDER));
         assert!(!text.contains("data:image"));
         assert!(!text.contains(&payload));
-        assert!(text.contains("[MCP output truncated:"));
+        assert!(text.contains("[truncated:"));
     }
 }

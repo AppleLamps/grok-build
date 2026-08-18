@@ -239,6 +239,32 @@ pub fn estimate_chars(s: u64) -> u64 {
     xai_token_estimation::estimate_chars(s)
 }
 
+/// One recoverable truncation footer: bytes kept, total bytes, optional
+/// log path, and the exact follow-up tool (with args) to read the rest.
+///
+/// Callers that already prefix a space (bash annotations) should add it
+/// themselves. The footer itself is a single `[truncated: …]` sentence.
+pub fn recoverable_truncation_footer(
+    bytes_kept: usize,
+    total_bytes: usize,
+    log_path: Option<&str>,
+    follow_up: &str,
+) -> String {
+    let kept = format_bytes(bytes_kept as u64);
+    let total = format_bytes(total_bytes as u64);
+    let mut s = format!("[truncated: showing {kept} of {total} bytes");
+    if let Some(path) = log_path.filter(|p| !p.is_empty()) {
+        s.push_str(" — full output at: ");
+        s.push_str(path);
+    }
+    if !follow_up.is_empty() {
+        s.push_str(". Recover with ");
+        s.push_str(follow_up);
+    }
+    s.push(']');
+    s
+}
+
 /// Human-readable size in powers of 1024: integral bytes (`512 B`), one
 /// decimal above (`1.5 MB`). Every output fits nine columns.
 pub fn format_bytes(bytes: u64) -> String {
@@ -402,6 +428,27 @@ mod tests {
         for (bytes, expected) in cases {
             assert_eq!(format_bytes(bytes), expected, "bytes = {bytes}");
         }
+    }
+
+    #[test]
+    fn recoverable_footer_includes_path_and_follow_up() {
+        let f = recoverable_truncation_footer(
+            2_000,
+            50_000,
+            Some("/tmp/out.log"),
+            "read_file /tmp/out.log",
+        );
+        assert!(f.contains("showing 2.0 KB of 48.8 KB bytes"), "{f}");
+        assert!(f.contains("full output at: /tmp/out.log"), "{f}");
+        assert!(f.contains("Recover with read_file /tmp/out.log"), "{f}");
+    }
+
+    #[test]
+    fn recoverable_footer_omits_empty_path() {
+        let f = recoverable_truncation_footer(8, 64, None, "get_task_output id=abc");
+        assert!(f.contains("showing 8 B of 64 B bytes"), "{f}");
+        assert!(!f.contains("full output at"), "{f}");
+        assert!(f.contains("Recover with get_task_output id=abc"), "{f}");
     }
 
     // ---- estimate_tokens ----

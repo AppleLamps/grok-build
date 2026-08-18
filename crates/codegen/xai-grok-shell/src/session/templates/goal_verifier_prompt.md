@@ -56,7 +56,7 @@ Write this object (fixed schema) with your file-write tool:
 ```json
 {
   "refuted": true,
-  "findings": [{"kind": "bug|gap|todo", "location": "path:line or where", "detail": "one line"}],
+  "findings": [{"kind": "bug|gap|todo", "location": "path:line or named command", "command": "optional command to run", "detail": "one line"}],
   "evidence": "string — one-line summary citation",
   "confidence": "high",
   "blocking": "none",
@@ -64,7 +64,7 @@ Write this object (fixed schema) with your file-write tool:
 }
 ```
 
-- `findings` (array — the PRIMARY output the implementer acts on): one item per gap, terse, no prose. `kind` = `bug` (defect in shipped behavior) | `gap` (unmet criterion / missing test or evidence) | `todo` (TODO/`#[ignore]`/stub left in). `location` = `path:line` when code-related, else where (e.g. "no test for criterion 3", "verification plan step 4"). `detail` = one concrete line. When the refute is that a test can't honestly drive the unit (it pre-positions state, starts past the unit, or re-implements it), `detail` must tell the IMPLEMENTER to REFACTOR the shipped code into a directly-callable pure unit — NOT to patch the test around an untestable unit (that whack-a-mole never converges). Empty/omitted only when you cannot refute.
+- `findings` (array — the PRIMARY output the implementer acts on): one item per gap, terse, no prose. `kind` = `bug` (defect in shipped behavior) | `gap` (unmet criterion / missing test or evidence) | `todo` (TODO/`#[ignore]`/stub left in). `location` MUST be `path:line` when code-related, otherwise a **named command** the next implementer round must run (e.g. `cargo test foo`, `pytest tests/test_x.py`). Optional `command` field for an explicit command when `location` is a `path:line`. Empty `location` **and** empty `command` are rejected — do not emit prose-only "where" notes. `detail` = one concrete line. When the refute is that a test can't honestly drive the unit (it pre-positions state, starts past the unit, or re-implements it), `detail` must tell the IMPLEMENTER to REFACTOR the shipped code into a directly-callable pure unit — NOT to patch the test around an untestable unit (that whack-a-mole never converges). Empty/omitted only when you cannot refute.
 - `refuted` (bool): `true` if you found grounds; `false` only after thorough investigation.
 - `evidence` (string): a one-line summary citation; for `code-change`, FINAL_RESPONSE prose is NOT evidence.
 - `confidence` (string): `"high"` | `"medium"` | `"low"`.

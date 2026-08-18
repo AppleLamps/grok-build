@@ -119,15 +119,31 @@ fn fit_output(output: &str, output_file: &std::path::Path, room: usize) -> (Stri
     if encoded_len(output) <= room {
         return (output.to_string(), false);
     }
+    let path = output_file.display().to_string();
+    let follow_up = format!("read_file {path}");
     let footer = format!(
-        "\n\n... (output truncated; full output at {})",
-        output_file.display()
+        "\n\n{}",
+        xai_grok_tools::util::truncate::recoverable_truncation_footer(
+            0,
+            output.len(),
+            Some(path.as_str()),
+            &follow_up,
+        )
     );
     let footer_room = encoded_len(&footer);
     if footer_room > room {
         return (String::new(), true);
     }
     let kept = prefix_within_encoded_len(output, room - footer_room);
+    let footer = format!(
+        "\n\n{}",
+        xai_grok_tools::util::truncate::recoverable_truncation_footer(
+            kept.len(),
+            output.len(),
+            Some(path.as_str()),
+            &follow_up,
+        )
+    );
     (format!("{kept}{footer}"), true)
 }
 

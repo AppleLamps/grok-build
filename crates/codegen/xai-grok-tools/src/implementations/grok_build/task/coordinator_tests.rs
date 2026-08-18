@@ -1511,7 +1511,7 @@ async fn completion_buffer_caps_summary_without_mutating_result() {
     assert_eq!(buffered[0].subagent_id, "buffered");
     assert_eq!(
         buffered[0].output.as_ref(),
-        "a\n[output truncated: 1 of 4 bytes shown]"
+        "a\n[truncated: showing 1 B of 4 B bytes. Recover with get_task_output id=buffered]"
     );
     harness.actor.abort();
 }
@@ -1589,7 +1589,7 @@ async fn buffered_completion_output_cap_bounds_buffered_summary() {
     assert!(
         buffered[0]
             .output
-            .contains("[output truncated: 8 of 64 bytes shown]"),
+            .contains("[truncated:"),
         "buffered output must be capped, got: {}",
         buffered[0].output
     );

@@ -342,7 +342,7 @@ impl From<BashToolOutput> for crate::types::output::ToolOutput {
 // DEFAULT prompt formatting
 // ───────────────────────────────────────────────────────────────────────────
 
-use crate::util::truncate::format_bytes;
+use crate::util::truncate::{format_bytes, recoverable_truncation_footer};
 
 /// Reason a `run_terminal_cmd` child was terminated before it could exit
 /// normally. When [`BashOutput::signal`] parses into one of these, the
@@ -403,11 +403,12 @@ impl std::fmt::Display for KillReason {
 fn annotations(bash: &BashOutput) -> String {
     let mut s = String::new();
     if bash.truncated {
-        let shown = format_bytes(bash.output.len() as u64);
-        let total = format_bytes(bash.total_bytes as u64);
-        s.push_str(&format!(
-            " [truncated: showing first/last {} of {} - full output at: {}]",
-            shown, total, bash.output_file
+        s.push(' ');
+        s.push_str(&recoverable_truncation_footer(
+            bash.output.len(),
+            bash.total_bytes,
+            Some(bash.output_file.as_str()),
+            &format!("read_file {}", bash.output_file),
         ));
     }
     if let Some(signal) = &bash.signal {
