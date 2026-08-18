@@ -1063,11 +1063,11 @@ mod tests {
         if let ToolOutput::MCP(mcp) = &result {
             if let MCPOutputDetails::OkayOutput(text) = mcp.output() {
                 assert!(
-                    text.contains("[MCP output truncated:"),
+                    text.contains("[truncated:"),
                     "truncated output must contain truncation annotation, got: {}",
                     &text[text.len().saturating_sub(200)..],
                 );
-                let expected = format!("showing first {}", format_bytes(limit as u64));
+                let expected = format!("showing {}", format_bytes(limit as u64));
                 assert!(
                     text.contains(&expected),
                     "annotation must show the truncation limit ({expected})"
@@ -1122,11 +1122,11 @@ mod tests {
         if let ToolOutput::MCP(mcp) = &result {
             if let MCPOutputDetails::OkayOutput(text) = mcp.output() {
                 assert!(
-                    text.contains("[MCP output truncated:"),
+                    text.contains("[truncated:"),
                     "truncated output must contain truncation annotation"
                 );
                 assert!(
-                    text.contains("showing first 4.9 KB"),
+                    text.contains("showing 4.9 KB of"),
                     "annotation must reflect the custom limit"
                 );
             } else {
@@ -1178,7 +1178,7 @@ mod tests {
         if let ToolOutput::MCP(mcp) = &result {
             if let MCPOutputDetails::Error(text) = mcp.output() {
                 assert!(
-                    text.contains("[MCP output truncated:"),
+                    text.contains("[truncated:"),
                     "large MCP error output must be truncated"
                 );
             } else {
@@ -1451,7 +1451,7 @@ mod tests {
         // presence-aware unit tests above.)
         if let ToolOutput::MCP(mcp) = &result {
             if let MCPOutputDetails::OkayOutput(text) = mcp.output() {
-                assert!(text.contains("[MCP output truncated:"));
+                assert!(text.contains("[truncated:"));
                 assert!(text.contains(".json"), "annotation names the .json file");
                 assert!(
                     text.contains(".json. "),
@@ -1520,7 +1520,7 @@ mod tests {
 
         if let ToolOutput::MCP(mcp) = &result {
             if let MCPOutputDetails::OkayOutput(text) = mcp.output() {
-                assert!(text.contains("[MCP output truncated:"));
+                assert!(text.contains("[truncated:"));
                 assert!(
                     !text.contains("ineffective on it") && !text.contains("to query"),
                     "no steer should be attached without a dump file: {text}"

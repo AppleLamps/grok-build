@@ -695,7 +695,13 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         {
             let mut summary = completion_summary(&request, &output.result);
             if let Some(cap) = self.config.buffered_completion_output_cap {
-                summary.output = super::cap_completion_output(&summary.output, cap);
+                let follow_up = format!("get_task_output id={}", request.id);
+                summary.output = super::cap_completion_output_with_recovery(
+                    &summary.output,
+                    cap,
+                    None,
+                    &follow_up,
+                );
             }
             self.pending_completions.push(BufferedCompletion {
                 parent_session_id: request.parent_session_id.clone(),

@@ -18,7 +18,9 @@ pub mod admission;
 pub mod backend;
 pub mod coordinator;
 mod coordinator_state;
-pub use coordinator_state::{cap_completion_output, completion_summary};
+pub use coordinator_state::{
+    cap_completion_output, cap_completion_output_with_recovery, completion_summary,
+};
 pub mod types;
 
 use self::backend::SubagentBackendResource;

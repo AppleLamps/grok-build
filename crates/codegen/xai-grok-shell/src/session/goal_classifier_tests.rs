@@ -416,14 +416,86 @@ fn parse_verdict_json_parses_findings_and_drops_empty() {
             "findings": [
                 {"kind": "bug", "location": "src/foo.rs:42", "detail": "off-by-one"},
                 {"kind": "", "location": "", "detail": ""},
-                {"kind": "gap", "location": "", "detail": "criterion 3 undriven"}
+                {"kind": "gap", "location": "", "detail": "criterion 3 undriven"},
+                {"kind": "gap", "command": "cargo test parse", "detail": "missing test"}
             ]
         }"##;
     let v = parse_verdict_json(body).expect("parses");
-    assert_eq!(v.findings.len(), 2, "the all-empty finding is dropped");
+    assert_eq!(
+        v.findings.len(),
+        2,
+        "empty and location-less prose findings are dropped"
+    );
     assert_eq!(v.findings[0].kind, "bug");
     assert_eq!(v.findings[0].location, "src/foo.rs:42");
     assert_eq!(v.findings[1].kind, "gap");
+    assert_eq!(v.findings[1].command, "cargo test parse");
+}
+
+#[test]
+fn findings_to_todos_marks_first_in_progress_and_names_the_command() {
+    let findings = vec![
+        Finding {
+            kind: "bug".into(),
+            location: "src/foo.rs:42".into(),
+            command: String::new(),
+            detail: "off-by-one".into(),
+        },
+        Finding {
+            kind: "gap".into(),
+            location: String::new(),
+            command: "cargo test parse".into(),
+            detail: "missing coverage".into(),
+        },
+    ];
+    let todos = findings_to_todos(&findings);
+    assert_eq!(todos.len(), 2);
+    assert_eq!(todos[0].id, "vf-1");
+    assert!(todos[0].in_progress);
+    assert!(todos[0].content.contains("src/foo.rs:42"));
+    assert!(!todos[1].in_progress);
+    assert!(todos[1].content.contains("cargo test parse"));
+}
+
+#[test]
+fn findings_to_todos_drops_empty_location_without_command() {
+    let findings = vec![Finding {
+        kind: "gap".into(),
+        location: String::new(),
+        command: String::new(),
+        detail: "criterion 3 undriven".into(),
+    }];
+    assert!(findings_to_todos(&findings).is_empty());
+}
+
+#[test]
+fn has_action_target_accepts_file_line_and_named_command() {
+    assert!(Finding {
+        location: "crates/foo.rs:12".into(),
+        ..Default::default()
+    }
+    .has_action_target());
+    assert!(Finding {
+        command: "cargo test foo".into(),
+        ..Default::default()
+    }
+    .has_action_target());
+    assert!(Finding {
+        location: "pytest tests/test_x.py::test_y".into(),
+        ..Default::default()
+    }
+    .has_action_target());
+    assert!(!Finding {
+        location: String::new(),
+        detail: "vibes".into(),
+        ..Default::default()
+    }
+    .has_action_target());
+    assert!(!Finding {
+        location: "somewhere in the tests".into(),
+        ..Default::default()
+    }
+    .has_action_target());
 }
 
 #[test]
@@ -757,11 +829,13 @@ fn render_refuter_bullet_prefers_structured_findings() {
         Finding {
             kind: "bug".into(),
             location: "src/foo.rs:42".into(),
+            command: String::new(),
             detail: "off-by-one".into(),
         },
         Finding {
             kind: "gap".into(),
             location: String::new(),
+            command: String::new(),
             detail: "criterion 3 undriven".into(),
         },
     ];
@@ -790,6 +864,7 @@ fn panel_details_lead_with_gaps_checklist_when_not_achieved() {
     r.findings = vec![Finding {
         kind: "bug".into(),
         location: "src/a.rs:1".into(),
+        command: String::new(),
         detail: "wrong index".into(),
     }];
     let body = render_skeptic_panel_details(&[r], 1, 1, false, "vid", 1);

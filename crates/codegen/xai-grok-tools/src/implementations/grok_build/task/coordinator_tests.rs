@@ -1511,7 +1511,7 @@ async fn completion_buffer_caps_summary_without_mutating_result() {
     assert_eq!(buffered[0].subagent_id, "buffered");
     assert_eq!(
         buffered[0].output.as_ref(),
-        "a\n[output truncated: 1 of 4 bytes shown]"
+        "a\n[truncated: showing 1 B of 4 B bytes. Recover with get_task_output id=buffered]"
     );
     harness.actor.abort();
 }
@@ -1587,9 +1587,7 @@ async fn buffered_completion_output_cap_bounds_buffered_summary() {
     let buffered = response_rx.await.expect("completion response");
     assert_eq!(buffered.len(), 1);
     assert!(
-        buffered[0]
-            .output
-            .contains("[output truncated: 8 of 64 bytes shown]"),
+        buffered[0].output.contains("[truncated:"),
         "buffered output must be capped, got: {}",
         buffered[0].output
     );
@@ -2549,4 +2547,14 @@ async fn workflow_spawns_bypass_the_session_concurrent_limit() {
             .success
     );
     harness.actor.abort();
+}
+
+#[test]
+fn cap_completion_output_omits_incomplete_follow_up() {
+    let out = super::super::cap_completion_output(&std::sync::Arc::from("abcdef"), 2);
+    assert!(out.contains("[truncated:"), "{out}");
+    assert!(
+        !out.contains("Recover with"),
+        "wrapper has no task id; do not advertise a bare get_task_output, got {out}"
+    );
 }

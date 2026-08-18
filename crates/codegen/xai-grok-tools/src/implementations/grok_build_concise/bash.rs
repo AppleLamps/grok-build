@@ -9,16 +9,17 @@ use crate::types::output::BashOutput;
 use crate::types::requirements::{Expr, ToolParamsRequirement, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-use crate::util::truncate::format_bytes;
+use crate::util::truncate::{format_bytes, recoverable_truncation_footer};
 
 fn annotations(bash: &BashOutput) -> String {
     let mut s = String::new();
     if bash.truncated {
-        let shown = format_bytes(bash.output.len() as u64);
-        let total = format_bytes(bash.total_bytes as u64);
-        s.push_str(&format!(
-            " [truncated: showing last {} of {} - full output at: {}]",
-            shown, total, bash.output_file
+        s.push(' ');
+        s.push_str(&recoverable_truncation_footer(
+            bash.output.len(),
+            bash.total_bytes,
+            Some(bash.output_file.as_str()),
+            &format!("read_file {}", bash.output_file),
         ));
     }
     if let Some(signal) = &bash.signal {

@@ -768,6 +768,17 @@ pub(super) fn completed_inspection(
 /// Truncate `output` to `cap` bytes (UTF-8 safe) with a truncation footer.
 /// Returns a refcount clone when already within the cap.
 pub fn cap_completion_output(output: &Arc<str>, cap: usize) -> Arc<str> {
+    cap_completion_output_with_recovery(output, cap, None, "")
+}
+
+/// Like [`cap_completion_output`], with an explicit log path and follow-up
+/// tool so the model can recover the rest.
+pub fn cap_completion_output_with_recovery(
+    output: &Arc<str>,
+    cap: usize,
+    log_path: Option<&str>,
+    follow_up: &str,
+) -> Arc<str> {
     if output.len() <= cap {
         return output.clone();
     }
@@ -776,10 +787,14 @@ pub fn cap_completion_output(output: &Arc<str>, cap: usize) -> Arc<str> {
         end -= 1;
     }
     Arc::from(format!(
-        "{}\n[output truncated: {} of {} bytes shown]",
+        "{}\n{}",
         &output[..end],
-        end,
-        output.len()
+        crate::util::truncate::recoverable_truncation_footer(
+            end,
+            output.len(),
+            log_path,
+            follow_up,
+        )
     ))
 }
 
@@ -790,8 +805,9 @@ pub fn completion_summary(
     request: &SubagentRequest,
     result: &SubagentResult,
 ) -> SubagentCompletionSummary {
+    let follow_up = format!("get_task_output id={}", request.id);
     let output = match request.runtime_overrides.completion_output_cap {
-        Some(cap) => cap_completion_output(&result.output, cap),
+        Some(cap) => cap_completion_output_with_recovery(&result.output, cap, None, &follow_up),
         None => result.output.clone(),
     };
     SubagentCompletionSummary {

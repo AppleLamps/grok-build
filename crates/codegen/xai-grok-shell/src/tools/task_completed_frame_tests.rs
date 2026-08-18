@@ -152,6 +152,23 @@ fn output_cut_to_fit_is_always_marked_incomplete() {
     assert!(snapshot.truncated, "a cut output must be marked incomplete");
 }
 
+#[test]
+fn truncated_ascii_output_keeps_a_prefix_inside_the_budget() {
+    let mut notification = notification(&"Z".repeat(64 * 1024));
+    let params = encode(&mut notification).unwrap();
+
+    assert!(frame_len(&params) <= FRAME_MAX_BYTES);
+    let snapshot = task_snapshot(&mut notification).unwrap();
+    assert!(snapshot.truncated);
+    assert!(
+        snapshot.output.starts_with('Z'),
+        "inline preview must survive footer resize, got {:?}",
+        snapshot.output.chars().take(80).collect::<String>()
+    );
+    assert!(snapshot.output.contains("[truncated:"));
+    assert!(snapshot.output.contains("Recover with read_file"));
+}
+
 /// Nothing is returned unmeasured. When even the ids do not fit, there is no
 /// message to send, and sending one anyway is what closes the connection.
 #[test]

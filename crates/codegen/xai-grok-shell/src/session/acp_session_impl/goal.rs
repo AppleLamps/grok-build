@@ -270,7 +270,9 @@ impl SessionActor {
                 gaps_summary,
                 pause_summary,
                 gap_fingerprint,
+                findings,
             } => {
+                self.seed_todos_from_verifier_findings(&findings).await;
                 {
                     let mut tracker = self.goal_tracker.lock();
                     Self::record_verdict_on_orchestration(
@@ -355,6 +357,41 @@ impl SessionActor {
             }
             o.last_classifier_at = Some(chrono::Utc::now().to_rfc3339());
         }
+    }
+
+    /// Replace the session todo list with one item per verifier finding.
+    /// First item is `in_progress`. No-op when the panel produced none
+    /// that named a command or `path:line`.
+    async fn seed_todos_from_verifier_findings(
+        &self,
+        findings: &[crate::session::goal_classifier::Finding],
+    ) {
+        use crate::session::goal_classifier::findings_to_todos;
+        use crate::tools::todo::{TodoItem, TodoPriority, TodoState, TodoStatus};
+        use xai_grok_tools::types::resources::State;
+        let todos = findings_to_todos(findings);
+        if todos.is_empty() {
+            return;
+        }
+        let mut state = TodoState::default();
+        for t in todos {
+            state.push(
+                t.id,
+                TodoItem {
+                    content: t.content,
+                    priority: TodoPriority::High,
+                    status: if t.in_progress {
+                        TodoStatus::InProgress
+                    } else {
+                        TodoStatus::Pending
+                    },
+                    meta: None,
+                },
+            );
+        }
+        self.tool_bridge_handle()
+            .update_resource(State(state))
+            .await;
     }
 
     pub(super) fn resolve_goal_classifier_policy(&self) -> GoalClassifierPolicy {
@@ -2067,7 +2104,9 @@ impl SessionActor {
                 gaps_summary,
                 pause_summary,
                 gap_fingerprint,
+                findings,
             } => {
+                self.seed_todos_from_verifier_findings(&findings).await;
                 {
                     let mut tracker = self.goal_tracker.lock();
                     Self::record_verdict_on_orchestration(

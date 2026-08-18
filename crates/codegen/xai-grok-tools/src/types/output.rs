@@ -1247,11 +1247,12 @@ impl xai_tool_runtime::ToolOutput for BashOutput {
         let mut stdout = String::from_utf8_lossy(&self.output).into_owned();
         let mut extra = serde_json::Map::new();
         if self.truncated {
-            let shown = crate::util::truncate::format_bytes(self.output.len() as u64);
-            let total = crate::util::truncate::format_bytes(self.total_bytes as u64);
-            stdout.push_str(&format!(
-                "\n[truncated: showing first/last {shown} of {total} - full output at: {}]",
-                self.output_file
+            stdout.push('\n');
+            stdout.push_str(&crate::util::truncate::recoverable_truncation_footer(
+                self.output.len(),
+                self.total_bytes,
+                Some(self.output_file.as_str()),
+                &format!("read_file {}", self.output_file),
             ));
             extra.insert("truncated".into(), serde_json::Value::Bool(true));
             extra.insert(

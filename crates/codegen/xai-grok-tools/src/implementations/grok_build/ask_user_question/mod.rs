@@ -39,14 +39,10 @@ pub use types::{
 use crate::notification::types::UserQuestionAsked;
 use crate::types::output::AskUserQuestionOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::{NotificationHandle, SharedResources};
+use crate::types::resources::NotificationHandle;
+#[cfg(test)]
+use crate::types::resources::SharedResources;
 use crate::types::tool::{ToolKind, ToolNamespace};
-
-/// Migration fallback: when `true`, a missing `UserQuestionSender` falls
-/// back to the old fire-and-forget `QuestionsSent` behavior with a warning.
-/// Set to `false` (or delete entirely) once the shell coordinator is wired
-/// up in TS-03 and confirmed working.
-const MIGRATION_FALLBACK: bool = true;
 
 /// Default max time to wait for the user to answer the questionnaire (all
 /// questions in this tool call share one timer): 30 minutes. On expiry the
@@ -263,63 +259,6 @@ impl crate::types::tool_metadata::ToolMetadata for AskUserQuestionTool {
     }
 }
 
-impl AskUserQuestionTool {
-    /// Fire-and-forget fallback used during migration when
-    /// `UserQuestionSender` is not yet injected by the shell.
-    ///
-    /// This preserves the old behavior: send a notification, return
-    /// `QuestionsSent`. Remove this method when `MIGRATION_FALLBACK` is
-    /// set to `false`.
-    async fn fallback_fire_and_forget(
-        &self,
-        input: &AskUserQuestionInput,
-        ctx: &xai_tool_runtime::ToolCallContext,
-        resources: &SharedResources,
-    ) -> Result<AskUserQuestionOutput, xai_tool_runtime::ToolError> {
-        let question_count = input.questions.len();
-
-        let questions_json = serde_json::to_value(&input.questions)
-            .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
-
-        {
-            let res = resources.lock().await;
-            if let Some(handle) = res.get::<NotificationHandle>() {
-                handle.0.send_user_question_asked(UserQuestionAsked {
-                    tool_call_id: ctx.call_id.as_str().to_owned(),
-                    questions_json,
-                });
-            }
-        }
-
-        tracing::info!(question_count, "Asked user questions (fallback path)");
-
-        let question_summary: Vec<String> = input
-            .questions
-            .iter()
-            .enumerate()
-            .map(|(i, q)| {
-                let options: Vec<&str> = q.options.iter().map(|o| o.label.as_str()).collect();
-                format!(
-                    "{}. {} [options: {}]",
-                    i + 1,
-                    q.question,
-                    options.join(", ")
-                )
-            })
-            .collect();
-
-        let message = format!(
-            "Your questions have been presented to the user for answering:\n{}",
-            question_summary.join("\n")
-        );
-
-        Ok(AskUserQuestionOutput::QuestionsSent {
-            message,
-            question_count,
-        })
-    }
-}
-
 impl xai_tool_runtime::Tool for AskUserQuestionTool {
     type Args = AskUserQuestionInput;
     type Output = AskUserQuestionOutput;
@@ -390,15 +329,6 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
         let sender = match sender {
             Some(s) => s,
             None => {
-                if MIGRATION_FALLBACK {
-                    tracing::warn!(
-                        "UserQuestionSender not available; falling back to fire-and-forget QuestionsSent. \
-                         This is expected during migration (TS-03 not yet wired)."
-                    );
-                    return self
-                        .fallback_fire_and_forget(&input, &ctx, &resources)
-                        .await;
-                }
                 return Err(xai_tool_runtime::ToolError::custom(
                     "missing_resource",
                     "UserQuestionSender".to_string(),
@@ -662,10 +592,10 @@ mod tests {
         assert_eq!(input.questions[0].multi_select, Some(true));
     }
 
-    // ── Migration fallback tests (no UserQuestionSender) ─────────────────
+    // ── Missing sender is a tool error (never QuestionsSent) ─────────────
 
     #[tokio::test]
-    async fn fallback_ask_single_question() {
+    async fn missing_sender_is_a_tool_error_not_questions_sent() {
         let resources = Resources::new();
         let shared = resources.into_shared();
         let tool = AskUserQuestionTool;
@@ -680,19 +610,13 @@ mod tests {
 
         let result =
             xai_tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "test-call"), input)
-                .await
-                .unwrap();
-
-        match result {
-            AskUserQuestionOutput::QuestionsSent {
-                ref message,
-                question_count,
-            } => {
-                assert_eq!(question_count, 1);
-                assert!(message.contains("Which database?"));
-            }
-            _ => panic!("Expected QuestionsSent fallback"),
-        }
+                .await;
+        let err = result.expect_err("missing UserQuestionSender must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UserQuestionSender") || msg.contains("missing_resource"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -724,8 +648,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_sends_notification() {
-        use crate::notification::types::{ToolNotification, ToolNotificationHandle};
+    async fn missing_sender_does_not_pretend_the_question_was_asked() {
+        use crate::notification::types::ToolNotificationHandle;
 
         let (handle, mut rx) = ToolNotificationHandle::channel();
         let mut resources = Resources::new();
@@ -738,17 +662,14 @@ mod tests {
             use_id_keyed_format: false,
         };
 
-        xai_tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "call-q"), input)
-            .await
-            .unwrap();
-
-        let notification = rx.try_recv().expect("should have received a notification");
-        match notification {
-            ToolNotification::UserQuestionAsked(asked) => {
-                assert_eq!(asked.tool_call_id, "call-q");
-            }
-            other => panic!("Expected UserQuestionAsked, got {:?}", other),
-        }
+        let result =
+            xai_tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "call-q"), input)
+                .await;
+        assert!(result.is_err(), "missing sender must be a tool error");
+        assert!(
+            rx.try_recv().is_err(),
+            "must not fire-and-forget a UserQuestionAsked notification"
+        );
     }
 
     // ── Validation tests ─────────────────────────────────────────────────

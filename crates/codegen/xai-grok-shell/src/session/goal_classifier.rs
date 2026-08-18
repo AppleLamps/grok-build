@@ -187,6 +187,9 @@ pub(crate) enum GoalClassifierOutcome {
         /// (undecorated, log-path-free) gap evidence via
         /// [`gap_fingerprint`]; the drain compares it across attempts.
         gap_fingerprint: String,
+        /// Actionable verifier findings (command or `path:line`) to seed
+        /// as todos. Empty when the panel emitted none that survived parse.
+        findings: Vec<Finding>,
     },
     /// Every refuter classified its gap as a contradiction or
     /// environment-unverifiable blocker — no model-fixable gap remains,
@@ -825,15 +828,20 @@ impl SkepticBlocking {
 /// `blocking`.
 /// One concise verifier finding (the implementer-facing gap list). Fields
 /// default to empty for weak-model robustness; an all-empty finding is
-/// dropped at parse time.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+/// dropped at parse time. A finding without a command or `path:line`
+/// location is also dropped — prose-only gaps cannot become todos.
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct Finding {
     /// `bug` | `gap` | `todo` (rendered verbatim after trim).
     #[serde(default)]
     pub kind: String,
-    /// `path:line` when code-related, else a short place; may be empty.
+    /// `path:line` when code-related, or a named command to run.
     #[serde(default)]
     pub location: String,
+    /// Optional explicit command (e.g. `cargo test foo`). When set, the
+    /// finding is actionable even if `location` is not a `path:line`.
+    #[serde(default)]
+    pub command: String,
     /// One-line description.
     #[serde(default)]
     pub detail: String,
@@ -843,8 +851,50 @@ impl Finding {
     fn is_empty(&self) -> bool {
         self.kind.trim().is_empty()
             && self.location.trim().is_empty()
+            && self.command.trim().is_empty()
             && self.detail.trim().is_empty()
     }
+
+    /// True when the finding names a `path:line` or a command the next
+    /// implementer round can run or edit.
+    pub(crate) fn has_action_target(&self) -> bool {
+        let cmd = self.command.trim();
+        if !cmd.is_empty() {
+            return true;
+        }
+        let loc = self.location.trim();
+        if loc.is_empty() {
+            return false;
+        }
+        is_file_line(loc) || looks_like_named_command(loc)
+    }
+}
+
+/// `path:line` or `path:line:col` — last colon-separated segment starts
+/// with a digit.
+fn is_file_line(s: &str) -> bool {
+    match s.rsplit_once(':') {
+        Some((path, rest)) if !path.is_empty() => {
+            rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+/// Named command: a `./` invocation or a known test/build runner.
+fn looks_like_named_command(s: &str) -> bool {
+    const RUNNERS: &[&str] = &[
+        "cargo", "pytest", "python", "python3", "npm", "pnpm", "yarn", "make", "go", "bazel",
+        "just", "bash", "sh",
+    ];
+    let t = s.trim();
+    if t.starts_with("./") {
+        return true;
+    }
+    RUNNERS.iter().any(|r| {
+        t.strip_prefix(r)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -904,7 +954,7 @@ pub(crate) fn parse_verdict_json(body: &str) -> Option<SkepticVerdict> {
         .findings
         .unwrap_or_default()
         .into_iter()
-        .filter(|f| !f.is_empty())
+        .filter(|f| !f.is_empty() && f.has_action_target())
         .collect();
     Some(SkepticVerdict {
         refuted,
@@ -1109,6 +1159,12 @@ fn render_finding(f: &Finding) -> String {
         (true, false) => format!("{head} — {detail}"),
         (true, true) => head.to_string(),
     };
+    let cmd = f.command.trim();
+    let body = if cmd.is_empty() || cmd == loc {
+        body
+    } else {
+        format!("{body} (run: {cmd})")
+    };
     sanitize_evidence(&body)
 }
 
@@ -1162,6 +1218,82 @@ fn build_gaps_summary(results: &[SkepticResult]) -> String {
         .map(render_refuter_bullet)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Deduplicated actionable findings from refuting skeptics, high→low
+/// confidence. Empty location/command findings never appear — they were
+/// dropped at parse or here.
+pub(crate) fn actionable_findings_from_panel(results: &[SkepticResult]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for r in refuters_by_confidence(results) {
+        for f in &r.findings {
+            if !f.has_action_target() {
+                continue;
+            }
+            let key = (
+                f.kind.trim().to_ascii_lowercase(),
+                f.location.trim().to_string(),
+                f.command.trim().to_string(),
+                f.detail.trim().to_string(),
+            );
+            if seen.insert(key) {
+                out.push(f.clone());
+            }
+        }
+    }
+    out
+}
+
+/// One todo seeded from a verifier finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FindingTodo {
+    pub id: String,
+    pub content: String,
+    pub in_progress: bool,
+}
+
+/// Convert actionable findings into todos: first `in_progress`, rest
+/// pending. Content always names the command or `path:line`.
+pub(crate) fn findings_to_todos(findings: &[Finding]) -> Vec<FindingTodo> {
+    findings
+        .iter()
+        .filter(|f| f.has_action_target())
+        .enumerate()
+        .map(|(i, f)| FindingTodo {
+            id: format!("vf-{}", i + 1),
+            content: finding_todo_content(f),
+            in_progress: i == 0,
+        })
+        .collect()
+}
+
+fn finding_todo_content(f: &Finding) -> String {
+    let kind = {
+        let k = f.kind.trim();
+        if k.is_empty() { "finding" } else { k }
+    };
+    let loc = f.location.trim();
+    let cmd = f.command.trim();
+    let detail = f.detail.trim();
+    let mut s = format!("[{kind}]");
+    if !loc.is_empty() {
+        s.push(' ');
+        s.push_str(loc);
+    } else if !cmd.is_empty() {
+        s.push(' ');
+        s.push_str(cmd);
+    }
+    if !detail.is_empty() {
+        s.push_str(" — ");
+        s.push_str(detail);
+    }
+    if !cmd.is_empty() && cmd != loc && !loc.is_empty() {
+        s.push_str(" (run: ");
+        s.push_str(cmd);
+        s.push(')');
+    }
+    s
 }
 
 /// Section headers for the auto-pause blocker summary, one per
@@ -2206,6 +2338,7 @@ pub(crate) async fn run_verification_stage(
             gaps_summary: build_gaps_summary(&results),
             pause_summary: build_pause_summary(&results),
             gap_fingerprint,
+            findings: actionable_findings_from_panel(&results),
         }
     };
     VerificationStageResult {

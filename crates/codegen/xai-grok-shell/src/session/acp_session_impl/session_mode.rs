@@ -21,12 +21,57 @@ pub(super) fn session_mode_id_from_prompt_mode(prompt_mode: PromptMode) -> acp::
     };
     acp::SessionModeId::new(mode.as_id())
 }
-/// Pass-through twin: no toolset in this build carries a plan-gated tool.
+/// Write/edit tools hidden while plan or ask mode is in effect.
+/// Names cover GrokBuild, GrokBuildConcise, hashline, Cursor-style, and Codex.
+/// Kind lookup is preferred; this list is the fallback when a definition has
+/// no registered kind (unit tests, aliased Cursor names).
+const WRITE_EDIT_TOOL_NAMES: &[&str] = &[
+    "search_replace",
+    "write",
+    "Write",
+    "StrReplace",
+    "EditNotebook",
+    "NotebookEdit",
+    "apply_patch",
+    "Edit",
+    "MultiEdit",
+    "hashline_edit",
+    "EditFile",
+];
+
+fn is_write_or_edit_tool(name: &str, kind: Option<xai_grok_tools::types::tool::ToolKind>) -> bool {
+    use xai_grok_tools::types::tool::ToolKind;
+    matches!(
+        kind,
+        Some(ToolKind::Edit | ToolKind::Write | ToolKind::Delete | ToolKind::Move)
+    ) || WRITE_EDIT_TOOL_NAMES
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n))
+}
+
+/// Hide write/edit tools when the session is read-only (plan/ask).
+/// `create_plan` / read / ask-user tools stay advertised.
 pub(super) fn filter_cursor_tools_by_plan_mode(
     defs: Vec<ToolDefinition>,
-    _plan_active: bool,
+    hide_writes: bool,
 ) -> Vec<ToolDefinition> {
-    defs
+    filter_write_edit_tools(defs, hide_writes, |_| None)
+}
+
+/// Like [`filter_cursor_tools_by_plan_mode`], using each tool's registered
+/// [`ToolKind`] when the caller can look it up (hides `hashline_edit` even
+/// if a future alias is missing from the name list).
+pub(super) fn filter_write_edit_tools(
+    defs: Vec<ToolDefinition>,
+    hide_writes: bool,
+    kind_of: impl Fn(&str) -> Option<xai_grok_tools::types::tool::ToolKind>,
+) -> Vec<ToolDefinition> {
+    if !hide_writes {
+        return defs;
+    }
+    defs.into_iter()
+        .filter(|d| !is_write_or_edit_tool(&d.function.name, kind_of(&d.function.name)))
+        .collect()
 }
 impl SessionActor {
     pub(super) fn apply_prompt_modes_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {
@@ -42,6 +87,7 @@ impl SessionActor {
     pub(super) async fn handle_session_mode(&self, session_mode_id: acp::SessionModeId) {
         use xai_grok_tools::types::SessionMode;
         let prompt_mode = prompt_mode_from_session_mode_id(&session_mode_id);
+        let previous_mode = *self.current_prompt_mode.lock();
         *self.current_prompt_mode.lock() = prompt_mode;
         let mode = SessionMode::from_id(session_mode_id.0.as_ref());
         if mode.is_plan() {
@@ -80,6 +126,11 @@ impl SessionActor {
                 )
                 .in_scope(|| {});
             }
+            self.agent.borrow_mut().apply_session_mode_overlay(false);
+            self.emit_resolved_tool_overrides();
+            if previous_mode != prompt_mode {
+                self.emit_write_availability_reminder(prompt_mode);
+            }
             return;
         }
         let was_plan = {
@@ -115,6 +166,7 @@ impl SessionActor {
             .in_scope(|| {});
         }
         let agent_def = match session_mode_id.0.as_ref() {
+            "plan" | "ask" | "default" => None,
             "browser_use" => Some(AgentDefinition::browser_use()),
             name => {
                 let cwd = self.tool_context.cwd.as_path();
@@ -131,14 +183,23 @@ impl SessionActor {
                 tool_configs = def.tool_config.tools.len(),
                 "Resolved AgentDefinition for session mode"
             );
-            self.agent
-                .borrow()
-                .update_policies_from_definition(def)
-                .await;
+            self.agent.borrow_mut().update_policies_from_definition(def);
             *self.active_agent_type.lock() = Some(def.name.clone());
+        } else {
+            // plan/ask overlay (read-only) or restore the home definition
+            // for agent/default. Do not resolve builtin `plan` — that is
+            // the plan *subagent* prompt, not a primary-session mode.
+            self.agent
+                .borrow_mut()
+                .apply_session_mode_overlay(prompt_mode == PromptMode::Agent);
         }
-        if let Some(ref def) = agent_def {
-            let new_prompt = self.agent.borrow().render_prompt_for_definition(def).await;
+        self.emit_resolved_tool_overrides();
+        if agent_def.is_some() {
+            // Cache the rendered prompt on the live Agent so a later model
+            // switch that reads `system_prompt()` cannot restore the previous
+            // agent's prompt while the new policies stay in effect.
+            self.agent.borrow_mut().finalize_prompt().await;
+            let new_prompt = self.agent.borrow().system_prompt().to_string();
             let mut conversation = self.chat_state_handle.get_conversation().await;
             for item in conversation.iter_mut() {
                 if let ConversationItem::System(sys) = item {
@@ -147,6 +208,9 @@ impl SessionActor {
                 }
             }
             self.chat_state_handle.replace_conversation(conversation);
+        }
+        if previous_mode != prompt_mode {
+            self.emit_write_availability_reminder(prompt_mode);
         }
     }
     /// Settle the mode a turn runs in, applying the prompt's declaration when
@@ -184,6 +248,7 @@ impl SessionActor {
     /// recover the mode either.
     pub(super) fn reconcile_plan_mode_with_prompt(&self, prompt_mode: PromptMode) {
         use crate::session::plan_mode::PlanModeState;
+        let previous_mode = *self.current_prompt_mode.lock();
         *self.current_prompt_mode.lock() = prompt_mode;
         match prompt_mode {
             PromptMode::Plan => {
@@ -192,6 +257,8 @@ impl SessionActor {
                     self.persist_plan_mode_state();
                     self.enqueue_current_mode_update(session_mode_id_from_prompt_mode(prompt_mode));
                 }
+                self.agent.borrow_mut().apply_session_mode_overlay(false);
+                self.emit_resolved_tool_overrides();
             }
             PromptMode::Agent | PromptMode::Ask => {
                 let was_plan = {
@@ -203,7 +270,14 @@ impl SessionActor {
                     self.persist_plan_mode_state();
                     self.enqueue_current_mode_update(session_mode_id_from_prompt_mode(prompt_mode));
                 }
+                self.agent
+                    .borrow_mut()
+                    .apply_session_mode_overlay(prompt_mode == PromptMode::Agent);
+                self.emit_resolved_tool_overrides();
             }
+        }
+        if previous_mode != prompt_mode {
+            self.emit_write_availability_reminder(prompt_mode);
         }
     }
     /// Inject plan mode system-reminders into the conversation.
@@ -402,5 +476,26 @@ impl SessionActor {
             .notifications
             .persistence_tx
             .send(PersistenceMsg::PlanModeState(snapshot));
+    }
+
+    /// One-line, model-visible reminder of current write/edit availability.
+    /// Keeps the prompt and the advertised tool set from disagreeing after
+    /// a plan/agent/ask switch.
+    fn emit_write_availability_reminder(&self, mode: PromptMode) {
+        self.push_system_reminder(write_availability_reminder(mode));
+    }
+}
+
+fn write_availability_reminder(mode: PromptMode) -> &'static str {
+    match mode {
+        PromptMode::Agent => {
+            "Write and edit tools are available (`search_replace`, `write`). \
+             Completion requirements match this agent definition."
+        }
+        PromptMode::Plan => {
+            "Write and edit tools are hidden. You may only update the plan file; \
+             other workspace edits are blocked."
+        }
+        PromptMode::Ask => "This mode is read-only. Write and edit tools are hidden.",
     }
 }
