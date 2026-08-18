@@ -39,7 +39,9 @@ pub use types::{
 use crate::notification::types::UserQuestionAsked;
 use crate::types::output::AskUserQuestionOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::{NotificationHandle, SharedResources};
+use crate::types::resources::NotificationHandle;
+#[cfg(test)]
+use crate::types::resources::SharedResources;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 /// Default max time to wait for the user to answer the questionnaire (all

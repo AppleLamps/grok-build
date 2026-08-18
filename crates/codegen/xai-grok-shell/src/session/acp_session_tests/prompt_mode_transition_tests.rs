@@ -260,13 +260,28 @@ async fn leaving_plan_mode_restores_search_replace_and_home_completion() {
     local
         .run_until(async {
             let (actor, _event_rx) = actor_with_events().await;
+            {
+                use xai_grok_tools::implementations::grok_build::read_file::ReadFileTool;
+                use xai_grok_tools::implementations::grok_build::search_replace::SearchReplaceTool;
+                use xai_grok_tools::registry::types::ToolConfig;
+                // SearchReplace requires a Read tool unless skip_read_before_edit is set.
+                let agent = test_agent_with_tools(vec![
+                    ToolConfig::for_tool::<ReadFileTool>(),
+                    ToolConfig::for_tool::<SearchReplaceTool>(),
+                ])
+                .await;
+                *actor.agent.borrow_mut() = agent;
+            }
             let mut home = actor.agent.borrow().definition().clone();
             home.completion_requirement = Some(xai_grok_agent::config::CompletionRequirement {
                 tool: "complete_task".into(),
                 reminder: "Call complete_task.".into(),
                 recovery: None,
             });
-            actor.agent.borrow_mut().update_policies_from_definition(&home);
+            actor
+                .agent
+                .borrow_mut()
+                .update_policies_from_definition(&home);
 
             actor
                 .handle_session_mode(acp::SessionModeId::new("plan"))
@@ -282,11 +297,7 @@ async fn leaving_plan_mode_restores_search_replace_and_home_completion() {
                 "search_replace must be hidden in plan mode, got {plan_names:?}"
             );
             assert!(
-                actor
-                    .agent
-                    .borrow()
-                    .completion_requirement()
-                    .is_none(),
+                actor.agent.borrow().completion_requirement().is_none(),
                 "plan overlay must drop the home completion gate"
             );
 

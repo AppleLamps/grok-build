@@ -1587,9 +1587,7 @@ async fn buffered_completion_output_cap_bounds_buffered_summary() {
     let buffered = response_rx.await.expect("completion response");
     assert_eq!(buffered.len(), 1);
     assert!(
-        buffered[0]
-            .output
-            .contains("[truncated:"),
+        buffered[0].output.contains("[truncated:"),
         "buffered output must be capped, got: {}",
         buffered[0].output
     );
